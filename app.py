@@ -37,11 +37,18 @@ tum_donemler = get_period_list()
 def normalize_name(name):
     return name.strip().title() if name else ""
 
-# --- VERİ TEMİZLEME VE HAZIRLAMA FONKSİYONU (YENİ) ---
+# YENİ: GÜVENLİ TAMSAYI ÇEVİRİCİ (Hatayı önleyen fonksiyon)
+def safe_int(val):
+    try:
+        if pd.isna(val) or val is None:
+            return 0
+        return int(float(val))
+    except:
+        return 0
+
 def clean_and_sort_data(df):
     if df.empty: return df
     
-    # 1. Sayısal Dönüşüm: Tüm tahmin sütunlarını sayıya zorla
     numeric_cols = [
         "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
         "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz",
@@ -52,19 +59,15 @@ def clean_and_sort_data(df):
     
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce') # Hatalı veriyi NaN yapar
+            df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # 2. Tarih Sıralaması: Dönem sütununu tarihe çevirip sırala
     if "donem" in df.columns:
-        # Geçici bir tarih sütunu oluştur
         df["temp_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="temp_date")
-        # Sıralama bitti, temp sütunu sil
         df = df.drop(columns=["temp_date"])
         
     return df
 
-# --- AKILLI KAYIT (UPSERT) ---
 def upsert_tahmin(user, period, category, data_dict):
     check_res = supabase.table(TABLE_TAHMIN).select("id").eq("kullanici_adi", user).eq("donem", period).execute()
     clean_data = {k: (v if v != 0 else None) for k, v in data_dict.items()}
@@ -80,7 +83,6 @@ def upsert_tahmin(user, period, category, data_dict):
         supabase.table(TABLE_TAHMIN).insert(clean_data).execute()
         return "inserted"
 
-# --- PDF OLUŞTURUCU ---
 def create_pdf_report(dataframe, figures):
     class PDF(FPDF):
         def header(self):
@@ -259,8 +261,7 @@ elif page == "✏️ Düzenle / Sil":
         # DÜZENLEME EKRANI VERİ TEMİZLİĞİ
         df_rec = pd.DataFrame(res_rec.data)
         if not df_rec.empty:
-            df_rec = clean_and_sort_data(df_rec) # Sıralamayı burada da düzeltiyoruz
-            # Descending (Yeni tarih en üstte)
+            df_rec = clean_and_sort_data(df_rec) 
             df_rec = df_rec.sort_values(by="donem", ascending=False)
             
             st.dataframe(df_rec, use_container_width=True)
@@ -277,7 +278,12 @@ elif page == "✏️ Düzenle / Sil":
                     st.markdown("### 🏦 PPK")
                     new_faiz = st.number_input("PPK Karar", value=g('tahmin_ppk_faiz'), step=0.25)
                     new_ys_faiz = st.number_input("Sene Sonu Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25)
-                    new_kat = st.number_input("Katılımcı (N)", value=int(target.get('katilimci_sayisi') or 0), step=1)
+                    
+                    # --- HATA DÜZELTME BURADA YAPILDI ---
+                    # target.get('katilimci_sayisi') NaN veya Float dönerse int() hata veriyordu.
+                    # safe_int() ile bunu sardık.
+                    new_kat = st.number_input("Katılımcı (N)", value=safe_int(target.get('katilimci_sayisi')), step=1)
+                
                 with c2:
                     st.markdown("### 🏷️ Enflasyon")
                     new_ay = st.number_input("Ay Medyan", value=g('tahmin_aylik_enf'), step=0.1)
@@ -315,15 +321,16 @@ elif page == "📊 Dashboard":
     df_kat = pd.DataFrame(res_kat.data)
 
     if not df_tahmin.empty and not df_kat.empty:
-        # 1. Veri Temizleme ve Sıralama (YENİ FONKSİYON BURADA KULLANILIYOR)
         df_tahmin = clean_and_sort_data(df_tahmin)
 
         df = pd.merge(df_tahmin, df_kat, left_on="kullanici_adi", right_on="ad_soyad", how="left")
         df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
-        df['hover_text'] = df.apply(lambda x: f"N={int(x['katilimci_sayisi'])}" if pd.notnull(x['katilimci_sayisi']) and x['katilimci_sayisi'] > 0 else "", axis=1)
+        
+        # Tooltip verisi hazırlarken de güvenli dönüşüm yapalım
+        df['hover_text'] = df['katilimci_sayisi'].apply(lambda x: f"N={int(x)}" if pd.notnull(x) and x > 0 else "")
+        
         df['kategori'] = df['kategori'].fillna('Bireysel')
         
-        # Filtreleme
         st.sidebar.header("🔍 Filtreler")
         cat_filter = st.sidebar.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
         available_users = sorted(df[df['kategori'].isin(cat_filter)]['gorunen_isim'].unique())
@@ -340,10 +347,7 @@ elif page == "📊 Dashboard":
 
         with tab_ts:
             def plot_w_range(df_sub, y_col, min_c, max_c, title):
-                # category_orders ile X eksenini sıralamaya zorluyoruz
                 fig = px.line(df_sub, x="donem", y=y_col, color="gorunen_isim", markers=True, title=title, hover_data=["hover_text"])
-                
-                # X eksenini sıralı kategori olarak ayarla
                 fig.update_xaxes(type='category', categoryorder='category ascending')
                 
                 df_r = df_sub.dropna(subset=[min_c, max_c])
