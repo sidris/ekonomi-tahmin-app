@@ -88,7 +88,7 @@ if page == "➕ Yeni Tahmin Gir":
                 }
                 
                 try:
-                    supabase.table("ekonomi_tahminleri").insert(yeni_veri).execute()
+                    supabase.table("tahminler4").insert(yeni_veri).execute()
                     st.success(f"✅ {kullanici}, {donem} dönemi için tahminlerin başarıyla kaydedildi!")
                 except Exception as e:
                     st.error(f"Hata oluştu: {e}")
@@ -100,7 +100,7 @@ elif page == "📊 Dashboard & Analiz":
     st.header("Tahmin Analizleri")
 
     # Veriyi Çek
-    response = supabase.table("ekonomi_tahminleri").select("*").execute()
+    response = supabase.table("tahminler4").select("*").execute()
     df = pd.DataFrame(response.data)
 
     if not df.empty:
@@ -155,4 +155,5 @@ elif page == "📊 Dashboard & Analiz":
         st.dataframe(df_filtered, use_container_width=True)
 
     else:
+
         st.info("📭 Henüz veri girişi yapılmamış. 'Yeni Tahmin Gir' menüsünden ilk kaydı oluşturabilirsiniz.")
