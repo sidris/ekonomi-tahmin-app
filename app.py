@@ -37,6 +37,33 @@ tum_donemler = get_period_list()
 def normalize_name(name):
     return name.strip().title() if name else ""
 
+# --- VERİ TEMİZLEME VE HAZIRLAMA FONKSİYONU (YENİ) ---
+def clean_and_sort_data(df):
+    if df.empty: return df
+    
+    # 1. Sayısal Dönüşüm: Tüm tahmin sütunlarını sayıya zorla
+    numeric_cols = [
+        "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
+        "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz",
+        "tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf",
+        "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf",
+        "katilimci_sayisi"
+    ]
+    
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce') # Hatalı veriyi NaN yapar
+    
+    # 2. Tarih Sıralaması: Dönem sütununu tarihe çevirip sırala
+    if "donem" in df.columns:
+        # Geçici bir tarih sütunu oluştur
+        df["temp_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
+        df = df.sort_values(by="temp_date")
+        # Sıralama bitti, temp sütunu sil
+        df = df.drop(columns=["temp_date"])
+        
+    return df
+
 # --- AKILLI KAYIT (UPSERT) ---
 def upsert_tahmin(user, period, category, data_dict):
     check_res = supabase.table(TABLE_TAHMIN).select("id").eq("kullanici_adi", user).eq("donem", period).execute()
@@ -76,7 +103,6 @@ def create_pdf_report(dataframe, figures):
     for title, fig in figures.items():
         pdf.add_page()
         pdf.set_font("Helvetica", 'B', 14)
-        # Türkçe karakter temizliği
         clean_title = title.replace("ı", "i").replace("ğ", "g").replace("ş", "s").replace("İ", "I").replace("ö", "o").replace("ü", "u").replace("ç", "c")
         pdf.cell(0, 10, clean_title, ln=True, align='C')
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
@@ -133,7 +159,7 @@ def get_participant_selection():
     return real_name, row['kategori'], sel_disp
 
 # ========================================================
-# SAYFA: PPK VERİSİ GİR (GÜNCELLENDİ: SENE SONU EKLENDİ)
+# SAYFA: PPK VERİSİ GİR
 # ========================================================
 if page == "➕ PPK Verisi Gir":
     st.header("🏦 Faiz Tahminleri")
@@ -144,15 +170,12 @@ if page == "➕ PPK Verisi Gir":
         with c2: donem = st.selectbox("Dönem", tum_donemler, index=tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0)
 
         st.markdown("---")
-        
-        # 1. BU AYKI FAİZ
         st.subheader("1. Bu Ayki PPK Kararı")
         col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
         val_faiz = col_f1.number_input("Karar Medyan %", step=0.25, format="%.2f")
         min_faiz = col_f2.number_input("Min %", step=0.25, format="%.2f")
         max_faiz = col_f3.number_input("Max %", step=0.25, format="%.2f")
 
-        # 2. SENE SONU FAİZ (YENİ)
         st.markdown("---")
         st.subheader("2. Sene Sonu Politika Faizi Beklentisi")
         col_ys1, col_ys2, col_ys3 = st.columns([2, 1, 1])
@@ -171,10 +194,8 @@ if page == "➕ PPK Verisi Gir":
                     "katilimci_sayisi": int(kat_sayisi) if kat_sayisi > 0 else 0
                 }
                 status = upsert_tahmin(kullanici, donem, kategori, data)
-                if status == "inserted":
-                    st.success(f"✅ {display_name} için PPK verileri eklendi.")
-                else:
-                    st.info(f"🔄 {display_name} için PPK verileri güncellendi.")
+                if status == "inserted": st.success("Eklendi")
+                else: st.info("Güncellendi")
 
 # ========================================================
 # SAYFA: ENFLASYON VERİSİ GİR
@@ -233,10 +254,15 @@ elif page == "✏️ Düzenle / Sil":
         name_map = dict(zip(df_users['display'], df_users['ad_soyad']))
         sel_disp = st.selectbox("Kişi/Kurum Seç", df_users["display"])
         real_name = name_map[sel_disp]
-        res_rec = supabase.table(TABLE_TAHMIN).select("*").eq("kullanici_adi", real_name).order("donem", desc=True).execute()
+        res_rec = supabase.table(TABLE_TAHMIN).select("*").eq("kullanici_adi", real_name).execute()
+        
+        # DÜZENLEME EKRANI VERİ TEMİZLİĞİ
         df_rec = pd.DataFrame(res_rec.data)
-
         if not df_rec.empty:
+            df_rec = clean_and_sort_data(df_rec) # Sıralamayı burada da düzeltiyoruz
+            # Descending (Yeni tarih en üstte)
+            df_rec = df_rec.sort_values(by="donem", ascending=False)
+            
             st.dataframe(df_rec, use_container_width=True)
             rec_opts = {f"{row['donem']} (ID: {row['id']})": row for i, row in df_rec.iterrows()}
             sel_key = st.selectbox("İşlem Yapılacak Kayıt", list(rec_opts.keys()))
@@ -250,7 +276,7 @@ elif page == "✏️ Düzenle / Sil":
                 with c1:
                     st.markdown("### 🏦 PPK")
                     new_faiz = st.number_input("PPK Karar", value=g('tahmin_ppk_faiz'), step=0.25)
-                    new_ys_faiz = st.number_input("Sene Sonu Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25) # YENİ
+                    new_ys_faiz = st.number_input("Sene Sonu Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25)
                     new_kat = st.number_input("Katılımcı (N)", value=int(target.get('katilimci_sayisi') or 0), step=1)
                 with c2:
                     st.markdown("### 🏷️ Enflasyon")
@@ -267,10 +293,8 @@ elif page == "✏️ Düzenle / Sil":
                 if update_btn:
                     def cv(v): return v if v!=0 else None
                     upd = {
-                        "tahmin_ppk_faiz": cv(new_faiz),
-                        "tahmin_yilsonu_faiz": cv(new_ys_faiz), # YENİ
-                        "tahmin_aylik_enf": cv(new_ay),
-                        "tahmin_yilsonu_enf": cv(new_ys),
+                        "tahmin_ppk_faiz": cv(new_faiz), "tahmin_yilsonu_faiz": cv(new_ys_faiz),
+                        "tahmin_aylik_enf": cv(new_ay), "tahmin_yilsonu_enf": cv(new_ys),
                         "katilimci_sayisi": int(new_kat) if new_kat > 0 else 0
                     }
                     supabase.table(TABLE_TAHMIN).update(upd).eq("id", target['id']).execute()
@@ -291,17 +315,20 @@ elif page == "📊 Dashboard":
     df_kat = pd.DataFrame(res_kat.data)
 
     if not df_tahmin.empty and not df_kat.empty:
+        # 1. Veri Temizleme ve Sıralama (YENİ FONKSİYON BURADA KULLANILIYOR)
+        df_tahmin = clean_and_sort_data(df_tahmin)
+
         df = pd.merge(df_tahmin, df_kat, left_on="kullanici_adi", right_on="ad_soyad", how="left")
         df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
-        df['hover_text'] = df.apply(lambda x: f"N={int(x['katilimci_sayisi'])}" if x['katilimci_sayisi'] and x['katilimci_sayisi'] > 0 else "", axis=1)
+        df['hover_text'] = df.apply(lambda x: f"N={int(x['katilimci_sayisi'])}" if pd.notnull(x['katilimci_sayisi']) and x['katilimci_sayisi'] > 0 else "", axis=1)
         df['kategori'] = df['kategori'].fillna('Bireysel')
-        df = df.sort_values(by="donem")
-
+        
+        # Filtreleme
         st.sidebar.header("🔍 Filtreler")
         cat_filter = st.sidebar.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
         available_users = sorted(df[df['kategori'].isin(cat_filter)]['gorunen_isim'].unique())
         user_filter = st.sidebar.multiselect("Katılımcı", available_users, default=available_users)
-        df['yil'] = df['donem'].apply(lambda x: x.split('-')[0])
+        df['yil'] = df['donem'].apply(lambda x: x.split('-')[0] if isinstance(x, str) else str(x).split('-')[0])
         year_filter = st.sidebar.multiselect("Yıl", sorted(df['yil'].unique()), default=sorted(df['yil'].unique()))
 
         df_filtered = df[df['kategori'].isin(cat_filter) & df['gorunen_isim'].isin(user_filter) & df['yil'].isin(year_filter)]
@@ -313,7 +340,12 @@ elif page == "📊 Dashboard":
 
         with tab_ts:
             def plot_w_range(df_sub, y_col, min_c, max_c, title):
+                # category_orders ile X eksenini sıralamaya zorluyoruz
                 fig = px.line(df_sub, x="donem", y=y_col, color="gorunen_isim", markers=True, title=title, hover_data=["hover_text"])
+                
+                # X eksenini sıralı kategori olarak ayarla
+                fig.update_xaxes(type='category', categoryorder='category ascending')
+                
                 df_r = df_sub.dropna(subset=[min_c, max_c])
                 if not df_r.empty:
                     for u in df_r['gorunen_isim'].unique():
@@ -324,7 +356,7 @@ elif page == "📊 Dashboard":
 
             c1, c2 = st.columns(2)
             with c1: report_figures["PPK Karar"] = plot_w_range(df_filtered, "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar Beklentisi")
-            with c2: report_figures["Sene Sonu Faiz"] = plot_w_range(df_filtered, "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz Beklentisi") # YENİ
+            with c2: report_figures["Sene Sonu Faiz"] = plot_w_range(df_filtered, "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz Beklentisi")
             
             st.markdown("---")
             c3, c4 = st.columns(2)
@@ -336,19 +368,16 @@ elif page == "📊 Dashboard":
                 per = df_filtered['donem'].max()
                 d_p = df_filtered[df_filtered['donem'] == per].copy()
                 if len(d_p) > 1:
-                    # Hangi metrikte sapma göreceğiz?
                     metric_map = {"PPK Karar": "tahmin_ppk_faiz", "Sene Sonu Faiz": "tahmin_yilsonu_faiz", "Aylık Enf": "tahmin_aylik_enf"}
                     sel_met_name = st.radio("Sapma Analizi İçin Veri Seç", list(metric_map.keys()), horizontal=True)
                     sel_met = metric_map[sel_met_name]
                     
-                    # Veri varsa çiz
                     if d_p[sel_met].notnull().sum() > 1:
                         med = d_p[sel_met].median()
                         d_p['sapma'] = d_p[sel_met] - med
                         d_p = d_p.sort_values(by='sapma')
                         fig = go.Figure()
                         for i, r in d_p.iterrows():
-                            # Null ise atla
                             if pd.isna(r['sapma']): continue
                             c = "crimson" if r['sapma'] < 0 else "seagreen"
                             fig.add_trace(go.Scatter(x=[0, r['sapma']], y=[r['gorunen_isim'], r['gorunen_isim']], mode='lines', line=dict(color=c), showlegend=False))
@@ -357,8 +386,7 @@ elif page == "📊 Dashboard":
                         fig.update_layout(title=f"{sel_met_name} Sapma ({per})", height=max(400, len(d_p)*30))
                         st.plotly_chart(fig, use_container_width=True)
                         report_figures["Sapma Analizi"] = fig
-                    else:
-                        st.info("Seçilen metrik için yeterli veri yok.")
+                    else: st.info("Yetersiz veri.")
         
         st.markdown("---")
         if st.button("📄 PDF İndir"):
