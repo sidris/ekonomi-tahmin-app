@@ -2,3 +2,5 @@ streamlit
 supabase
 pandas
 plotly
+fpdf2
+kaleido==0.2.1
