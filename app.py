@@ -76,7 +76,7 @@ if page == "➕ Tahmin Ekle":
         with col_id2:
             donem = st.selectbox("Tahmin Dönemi", tum_donemler, index=tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0)
 
-        st.markdown("### 🎯 Temel Tahminler (Nokta Atışı)")
+        st.markdown("### 🎯 Temel Tahminler (Medyan)")
         col1, col2 = st.columns(2)
         col3, col4 = st.columns(2)
 
@@ -85,9 +85,9 @@ if page == "➕ Tahmin Ekle":
         with col3: val_yilsonu = st.number_input("3. Yıl Sonu Beklentisi (%)", step=0.1, format="%.2f")
         with col4: val_faiz = st.number_input("4. PPK Faiz Kararı (%)", step=0.25, format="%.2f")
 
-        # --- YENİ BÖLÜM: ARALIK TAHMİNLERİ (Expander) ---
+        # --- ARALIK TAHMİNLERİ (Expander) ---
         with st.expander("📊 Anket Aralığı (En Düşük / En Yüksek) - Opsiyonel"):
-            st.info("Eğer bir kurum anketi giriyorsanız, o anketin Min/Max değerlerini buraya girebilirsiniz.")
+            st.info("💡 **İPUCU:** Kurum sadece tek bir rakam (medyan) açıkladıysa bu alanları **0.00** olarak bırakın.")
             
             c_min1, c_max1 = st.columns(2)
             min_aylik = c_min1.number_input("Min. Aylık Enf.", step=0.1, key="min_ay")
@@ -119,7 +119,7 @@ if page == "➕ Tahmin Ekle":
                 if check_res.data:
                     st.warning(f"⚠️ {clean_user} için {donem} kaydı zaten var.")
                 else:
-                    # Sıfır girilen min/max değerlerini None (Null) yapalım ki grafikte sıfır çizgisi çıkmasın
+                    # 0.00 olanları veritabanına NULL olarak gönderir
                     def clean_val(val): return val if val != 0 else None
 
                     yeni_veri = {
@@ -130,7 +130,6 @@ if page == "➕ Tahmin Ekle":
                         "tahmin_yillik_enf": val_yillik,
                         "tahmin_yilsonu_enf": val_yilsonu,
                         "tahmin_ppk_faiz": val_faiz,
-                        # Yeni Alanlar
                         "min_aylik_enf": clean_val(min_aylik), "max_aylik_enf": clean_val(max_aylik),
                         "min_yillik_enf": clean_val(min_yillik), "max_yillik_enf": clean_val(max_yillik),
                         "min_yilsonu_enf": clean_val(min_yilsonu), "max_yilsonu_enf": clean_val(max_yilsonu),
@@ -138,11 +137,11 @@ if page == "➕ Tahmin Ekle":
                     }
                     try:
                         supabase.table(TABLE_NAME).insert(yeni_veri).execute()
-                        st.success(f"✅ {clean_user} verisi başarıyla eklendi!")
+                        st.success(f"✅ {clean_user} verisi eklendi!")
                     except Exception as e:
                         st.error(f"Hata: {e}")
             else:
-                st.warning("İsim alanı boş bırakılamaz.")
+                st.warning("İsim alanı gereklidir.")
 
 # ========================================================
 # SAYFA 2: DÜZENLEME
@@ -177,13 +176,10 @@ elif page == "✏️ Düzenle / İncele":
                 e_yilsonu = col_e1.number_input("Yıl Sonu", value=float(target_record['tahmin_yilsonu_enf'] or 0), step=0.1)
                 e_faiz = col_e2.number_input("PPK Faiz", value=float(target_record['tahmin_ppk_faiz'] or 0), step=0.25)
 
-                # Min/Max Verileri (Varsayılan yoksa 0.0)
-                st.markdown("**Aralık Bilgileri (Min/Max)**")
+                st.markdown("**Aralık Bilgileri (0 bırakırsanız silinir)**")
                 c_min, c_max = st.columns(2)
                 e_min_faiz = c_min.number_input("Min Faiz", value=float(target_record.get('min_ppk_faiz') or 0), step=0.25)
                 e_max_faiz = c_max.number_input("Max Faiz", value=float(target_record.get('max_ppk_faiz') or 0), step=0.25)
-                
-                # (Diğer min/max'lar da buraya eklenebilir ama kod uzamasın diye sadece Faizi örnek koydum, formda yer tasarrufu için)
 
                 if st.form_submit_button("Güncelle"):
                     def clean_val(val): return val if val != 0 else None
@@ -217,76 +213,88 @@ elif page == "📊 Genel Dashboard":
         available_users = sorted(df[df['kategori'].isin(cat_filter)]['kullanici_adi'].unique())
         user_filter = st.sidebar.multiselect("Katılımcı", available_users, default=available_users)
         
-        df_filtered = df[df['kategori'].isin(cat_filter) & df['kullanici_adi'].isin(user_filter)]
+        # Tarih filtresi
+        df['yil'] = df['donem'].apply(lambda x: x.split('-')[0])
+        year_filter = st.sidebar.multiselect("Yıl", sorted(df['yil'].unique()), default=sorted(df['yil'].unique()))
+
+        df_filtered = df[
+            df['kategori'].isin(cat_filter) & 
+            df['kullanici_adi'].isin(user_filter) &
+            df['yil'].isin(year_filter)
+        ]
 
         if df_filtered.empty:
             st.stop()
 
         # --- GRAFİKLER ---
-        tab_ts, tab_dev = st.tabs(["📈 Zaman Serisi (Aralıklı)", "🍭 Medyan Sapma"])
+        tab_ts, tab_dev = st.tabs(["📈 Zaman Serisi (Hibrit)", "🍭 Medyan Sapma"])
 
         with tab_ts:
-            st.info("Kurumların Min/Max tahmin aralıkları dikey çizgiler (Hata Çubukları) olarak gösterilmektedir.")
+            st.info("Dikey gri çizgiler kurumların 'Min/Max' aralığını gösterir. Çizgisi olmayanlar sadece tek tahmin (medyan) açıklamıştır.")
             
-            # --- ÖZEL GRAFİK FONKSİYONU (Hata Çubuklu) ---
             def plot_with_range(df_sub, y_col, min_col, max_col, title):
-                # Önce Plotly Express ile ana çizgiyi çiz
+                # 1. Ana Tahmin Çizgileri
                 fig = px.line(df_sub, x="donem", y=y_col, color="kullanici_adi", markers=True, title=title)
                 
-                # Min/Max verisi olanlar için hata çubuklarını hesapla
-                # Plotly 'error_y' (yukarı sapma) ve 'error_y_minus' (aşağı sapma) ister.
-                # Yani: error_y = Max - Tahmin, error_y_minus = Tahmin - Min
-                
+                # 2. Hata Çubukları (Sadece Min/Max verisi olanlara eklenir)
+                # Null olmayan kayıtları filtrele
                 df_range = df_sub.dropna(subset=[min_col, max_col])
                 
                 if not df_range.empty:
-                    # Her bir kullanıcı için hata çubuklarını ekle
                     for user in df_range['kullanici_adi'].unique():
                         user_data = df_range[df_range['kullanici_adi'] == user]
                         
                         fig.add_trace(go.Scatter(
                             x=user_data['donem'],
                             y=user_data[y_col],
-                            mode='markers', # Sadece noktaların üstüne bar koyacağız
+                            mode='markers', 
                             error_y=dict(
                                 type='data',
                                 symmetric=False,
-                                array=user_data[max_col] - user_data[y_col], # Yukarı çubuk uzunluğu
-                                arrayminus=user_data[y_col] - user_data[min_col], # Aşağı çubuk uzunluğu
-                                color='gray', # Çubuk rengi
+                                array=user_data[max_col] - user_data[y_col],
+                                arrayminus=user_data[y_col] - user_data[min_col],
+                                color='gray',
                                 thickness=1.5,
                                 width=3
                             ),
                             showlegend=False,
                             hoverinfo='skip',
-                            marker=dict(size=0, opacity=0) # Görünmez nokta (zaten çizgide var)
+                            marker=dict(size=0, opacity=0)
                         ))
                 st.plotly_chart(fig, use_container_width=True)
 
             c1, c2 = st.columns(2)
             with c1:
-                plot_with_range(df_filtered, "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Faiz Beklentisi ve Aralıkları")
+                plot_with_range(df_filtered, "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Faiz Beklentisi")
             with c2:
-                plot_with_range(df_filtered, "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enf. ve Aralıkları")
+                plot_with_range(df_filtered, "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enf. Beklentisi")
 
         with tab_dev:
-            # Burası eski Lolipop grafik kodun aynısı (yer kaplamasın diye kısalttım, önceki cevaptaki kod duruyor)
+            # Lolipop (Sadece Medyan kullanılır)
             target_period = st.selectbox("Dönem Seç", sorted(df_filtered['donem'].unique(), reverse=True), key="loli_period")
-            df_period = df_filtered[df_filtered['donem'] == target_period]
+            df_period = df_filtered[df_filtered['donem'] == target_period].copy()
             
             if len(df_period) > 1:
-                metric = "tahmin_ppk_faiz" # Varsayılan olarak Faizi gösterelim
-                median_val = df_period[metric].median()
-                df_period['sapma'] = df_period[metric] - median_val
+                col_met, col_gr = st.columns([1,3])
+                with col_met:
+                    metric_map = {"PPK Faizi": "tahmin_ppk_faiz", "Yıl Sonu Enf.": "tahmin_yilsonu_enf"}
+                    sel_met_name = st.radio("Metrik", list(metric_map.keys()))
+                    sel_met = metric_map[sel_met_name]
                 
-                fig_loli = go.Figure()
-                for i, row in df_period.iterrows():
-                    color = "crimson" if row['sapma'] < 0 else "seagreen"
-                    fig_loli.add_trace(go.Scatter(x=[0, row['sapma']], y=[row['kullanici_adi'], row['kullanici_adi']], mode='lines', line=dict(color=color)))
-                    fig_loli.add_trace(go.Scatter(x=[row['sapma']], y=[row['kullanici_adi']], mode='markers', marker=dict(color=color, size=10)))
-                
-                fig_loli.add_vline(x=0, line_dash="dash", annotation_text="Medyan")
-                fig_loli.update_layout(title=f"{target_period} Faiz Sapma Analizi (Medyan: %{median_val})", height=500)
-                st.plotly_chart(fig_loli, use_container_width=True)
+                with col_gr:
+                    median_val = df_period[sel_met].median()
+                    df_period['sapma'] = df_period[sel_met] - median_val
+                    df_period = df_period.sort_values(by='sapma')
+
+                    fig_loli = go.Figure()
+                    for i, row in df_period.iterrows():
+                        color = "crimson" if row['sapma'] < 0 else "seagreen"
+                        fig_loli.add_trace(go.Scatter(x=[0, row['sapma']], y=[row['kullanici_adi'], row['kullanici_adi']], mode='lines', line=dict(color=color), showlegend=False))
+                        fig_loli.add_trace(go.Scatter(x=[row['sapma']], y=[row['kullanici_adi']], mode='markers', marker=dict(color=color, size=12), 
+                                                      name=row['kullanici_adi'], text=f"Tahmin: %{row[sel_met]}", hoverinfo='text'))
+                    
+                    fig_loli.add_vline(x=0, line_dash="dash", annotation_text="Medyan", annotation_position="top")
+                    fig_loli.update_layout(title=f"{sel_met_name} - Medyandan Sapma (Medyan: %{median_val:.2f})", xaxis_title="Sapma (Puan)", height=max(400, len(df_period)*30))
+                    st.plotly_chart(fig_loli, use_container_width=True)
             else:
-                st.info("Lolipop için en az 2 veri lazım.")
+                st.info("Lolipop için en az 2 veri gerekli.")
