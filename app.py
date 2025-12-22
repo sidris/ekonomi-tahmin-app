@@ -37,18 +37,14 @@ tum_donemler = get_period_list()
 def normalize_name(name):
     return name.strip().title() if name else ""
 
-# YENİ: GÜVENLİ TAMSAYI ÇEVİRİCİ (Hatayı önleyen fonksiyon)
 def safe_int(val):
     try:
-        if pd.isna(val) or val is None:
-            return 0
+        if pd.isna(val) or val is None: return 0
         return int(float(val))
-    except:
-        return 0
+    except: return 0
 
 def clean_and_sort_data(df):
     if df.empty: return df
-    
     numeric_cols = [
         "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
         "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz",
@@ -56,16 +52,13 @@ def clean_and_sort_data(df):
         "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf",
         "katilimci_sayisi"
     ]
-    
     for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
     
     if "donem" in df.columns:
         df["temp_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="temp_date")
         df = df.drop(columns=["temp_date"])
-        
     return df
 
 def upsert_tahmin(user, period, category, data_dict):
@@ -165,7 +158,6 @@ def get_participant_selection():
 # ========================================================
 if page == "➕ PPK Verisi Gir":
     st.header("🏦 Faiz Tahminleri")
-    
     with st.form("ppk_form"):
         c1, c2 = st.columns(2)
         with c1: kullanici, kategori, display_name = get_participant_selection()
@@ -178,10 +170,9 @@ if page == "➕ PPK Verisi Gir":
         min_faiz = col_f2.number_input("Min %", step=0.25, format="%.2f")
         max_faiz = col_f3.number_input("Max %", step=0.25, format="%.2f")
 
-        st.markdown("---")
-        st.subheader("2. Sene Sonu Politika Faizi Beklentisi")
+        st.subheader("2. Sene Sonu Faiz Beklentisi")
         col_ys1, col_ys2, col_ys3 = st.columns([2, 1, 1])
-        val_ys_faiz = col_ys1.number_input("Sene Sonu Medyan %", step=0.25, format="%.2f", key="ys_f")
+        val_ys_faiz = col_ys1.number_input("YS Medyan %", step=0.25, format="%.2f", key="ys_f")
         min_ys_faiz = col_ys2.number_input("Min %", step=0.25, format="%.2f", key="min_ys_f")
         max_ys_faiz = col_ys3.number_input("Max %", step=0.25, format="%.2f", key="max_ys_f")
 
@@ -258,7 +249,6 @@ elif page == "✏️ Düzenle / Sil":
         real_name = name_map[sel_disp]
         res_rec = supabase.table(TABLE_TAHMIN).select("*").eq("kullanici_adi", real_name).execute()
         
-        # DÜZENLEME EKRANI VERİ TEMİZLİĞİ
         df_rec = pd.DataFrame(res_rec.data)
         if not df_rec.empty:
             df_rec = clean_and_sort_data(df_rec) 
@@ -278,10 +268,6 @@ elif page == "✏️ Düzenle / Sil":
                     st.markdown("### 🏦 PPK")
                     new_faiz = st.number_input("PPK Karar", value=g('tahmin_ppk_faiz'), step=0.25)
                     new_ys_faiz = st.number_input("Sene Sonu Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25)
-                    
-                    # --- HATA DÜZELTME BURADA YAPILDI ---
-                    # target.get('katilimci_sayisi') NaN veya Float dönerse int() hata veriyordu.
-                    # safe_int() ile bunu sardık.
                     new_kat = st.number_input("Katılımcı (N)", value=safe_int(target.get('katilimci_sayisi')), step=1)
                 
                 with c2:
@@ -322,13 +308,14 @@ elif page == "📊 Dashboard":
 
     if not df_tahmin.empty and not df_kat.empty:
         df_tahmin = clean_and_sort_data(df_tahmin)
-
-        df = pd.merge(df_tahmin, df_kat, left_on="kullanici_adi", right_on="ad_soyad", how="left")
+        
+        # --- ÖNEMLİ DEĞİŞİKLİK: INNER JOIN ---
+        # Artık sadece 'katilimcilar' tablosunda hala var olan kişilerin verilerini gösterir.
+        # Silinen kişinin verisi veritabanında kalsa bile grafiğe gelmez.
+        df = pd.merge(df_tahmin, df_kat, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+        
         df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
-        
-        # Tooltip verisi hazırlarken de güvenli dönüşüm yapalım
         df['hover_text'] = df['katilimci_sayisi'].apply(lambda x: f"N={int(x)}" if pd.notnull(x) and x > 0 else "")
-        
         df['kategori'] = df['kategori'].fillna('Bireysel')
         
         st.sidebar.header("🔍 Filtreler")
@@ -416,6 +403,8 @@ elif page == "👥 Katılımcı Yönetimi":
     if not df.empty:
         st.dataframe(df)
         ks = st.selectbox("Silinecek", df["ad_soyad"].unique())
+        # YENİ SİLME MANTIĞI: ÖNCE TAHMİNLERİ SİL
         if st.button("Sil"):
-            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute() # Önce tahminler
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute() # Sonra kişi
             st.rerun()
