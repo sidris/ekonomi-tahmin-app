@@ -25,7 +25,6 @@ st.markdown("""
     .stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
     h1, h2, h3 { color: #2c3e50; }
-    /* Tablo başlıklarını sabitleme ve okunabilirlik */
     div[data-testid="stDataFrame"] { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
@@ -159,7 +158,7 @@ def get_participant_selection():
     return name_map[sel], row['kategori'], sel
 
 # ========================================================
-# SAYFA: GELİŞMİŞ VERİ HAVUZU (YÖNETİM & EXCEL)
+# SAYFA: GELİŞMİŞ VERİ HAVUZU
 # ========================================================
 if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
@@ -192,8 +191,6 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
             
             if not admin_mode:
                 st.markdown("---")
-                
-                # --- TÜM SÜTUNLARI İÇEREN LİSTE ---
                 full_view_cols = [
                     "tahmin_tarihi", "donem", "kullanici_adi", "kategori", "anket_kaynagi", "kaynak_link", "katilimci_sayisi",
                     "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
@@ -202,14 +199,11 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                     "tahmin_yillik_enf", "min_yillik_enf", "max_yillik_enf",
                     "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf"
                 ]
-                
-                # Mevcut sütunları filtrele
                 final_cols = [c for c in full_view_cols if c in df_f.columns]
                 
                 col_cfg = {
                     "kaynak_link": st.column_config.LinkColumn("Link", display_text="🔗"),
                     "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"),
-                    # Tüm sayısal sütunlara format uygula
                     **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c or "min" in c or "max" in c}
                 }
                 
@@ -318,8 +312,10 @@ elif page == "Dashboard":
     if not df_t.empty and not df_k.empty:
         df_t = clean_and_sort_data(df_t)
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
+        # Sort by actual date for latest record logic
         df_t = df_t.sort_values(by='tahmin_tarihi')
-        # Her dönem için en son girilen veriyi al
+        
+        # Her dönem ve kullanıcı için son girilen veriyi al
         df_latest = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         
         df = pd.merge(df_latest, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
@@ -335,6 +331,13 @@ elif page == "Dashboard":
 
         with st.sidebar:
             st.markdown("### 🔍 Dashboard Filtreleri")
+            # Medyan Hesaplama Seçeneği
+            calc_method = st.radio("Medyan Hesaplama", ["Otomatik", "Manuel"], help="Kırmızı medyan çizgisini otomatik hesapla veya elle gir.")
+            manual_median_val = 0.0
+            if calc_method == "Manuel":
+                manual_median_val = st.number_input("Manuel Medyan Değeri", step=0.01, format="%.2f")
+            
+            st.markdown("---")
             cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
             users_in_cat = df[df['kategori'].isin(cat_filter)]['gorunen_isim'].unique()
             user_filter = st.multiselect("Katılımcı", sorted(users_in_cat), default=sorted(users_in_cat))
@@ -344,11 +347,13 @@ elif page == "Dashboard":
         df_filtered = df[df['kategori'].isin(cat_filter) & df['gorunen_isim'].isin(user_filter) & df['yil'].isin(year_filter)]
         if df_filtered.empty: st.warning("Veri bulunamadı."); st.stop()
 
-        tabs = st.tabs(["📈 Zaman Serisi", "🍭 Medyan Sapma", "📦 Dağılım (Box Plot)"])
+        tabs = st.tabs(["📈 Zaman Serisi", "📍 Dağılım Analizi (Dot Plot)", "📦 Kutu Grafiği"])
         report_figures = {}
 
+        # 1. ZAMAN SERİSİ
         with tabs[0]:
             def plot_chart(y_col, min_c, max_c, title):
+                # donem_date ile sıralı çizim yapalım (String sıralama hatasını önler)
                 fig = px.line(df_filtered.sort_values("donem_date"), x="donem", y=y_col, color="gorunen_isim", markers=True, title=title, hover_data=["hover_text"])
                 df_r = df_filtered.dropna(subset=[min_c, max_c])
                 for u in df_r['gorunen_isim'].unique():
@@ -364,43 +369,94 @@ elif page == "Dashboard":
             with c3: report_figures["Ay Enf"] = plot_chart("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enflasyon")
             with c4: report_figures["YS Enf"] = plot_chart("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enflasyon")
 
+        # 2. DAĞILIM (DOT PLOT - ISTENEN GORSEL)
         with tabs[1]:
-            per = df_filtered['donem'].max()
-            d_p = df_filtered[df_filtered['donem'] == per].copy()
-            if len(d_p) > 1:
+            # Dönem Seçimi
+            all_periods = sorted(list(df_filtered['donem'].unique()), reverse=True)
+            target_period = st.selectbox("Analiz Dönemi Seç", all_periods, key="dot_period")
+            
+            # Veri Filtreleme
+            d_p = df_filtered[df_filtered['donem'] == target_period].copy()
+            
+            if len(d_p) > 0:
                 met_map = {"PPK": "tahmin_ppk_faiz", "Enflasyon (Aylık)": "tahmin_aylik_enf", "YS Enflasyon": "tahmin_yilsonu_enf"}
-                sel_m = st.radio("Metrik", list(met_map.keys()), horizontal=True)
+                sel_m = st.radio("Analiz Metriği", list(met_map.keys()), horizontal=True)
                 m_col = met_map[sel_m]
                 
-                if d_p[m_col].notnull().sum() > 1:
-                    med = d_p[m_col].median()
-                    d_p['sapma'] = d_p[m_col] - med
-                    d_p = d_p.sort_values(by='sapma')
+                # NaN Temizliği
+                d_p = d_p.dropna(subset=[m_col])
+                
+                if len(d_p) > 0:
+                    # Medyan Hesabı
+                    if calc_method == "Manuel":
+                        median_val = manual_median_val
+                    else:
+                        median_val = d_p[m_col].median()
                     
+                    # Sıralama: Değere göre (Küçükten büyüğe - Görseldeki gibi)
+                    d_p = d_p.sort_values(by=m_col, ascending=True)
+                    
+                    # Grafik
                     fig = go.Figure()
-                    for i, r in d_p.iterrows():
-                        if pd.isna(r['sapma']): continue
-                        clr = "#e74c3c" if r['sapma'] < 0 else "#27ae60"
-                        fig.add_trace(go.Scatter(x=[0, r['sapma']], y=[r['gorunen_isim'], r['gorunen_isim']], mode='lines', line=dict(color=clr, width=3), showlegend=False))
-                        fig.add_trace(go.Scatter(x=[r['sapma']], y=[r['gorunen_isim']], mode='markers', marker=dict(color=clr, size=14, line=dict(width=2, color='white')), name=r['gorunen_isim'], text=f"Tahmin: {r[m_col]}", hoverinfo='text'))
                     
-                    fig.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="Medyan")
-                    fig.update_layout(title=f"{sel_m} Sapma Analizi ({per}) | Medyan: {med}", height=max(400, len(d_p)*40), xaxis_title="Sapma Puanı")
-                    st.plotly_chart(fig, use_container_width=True)
-                    report_figures["Sapma"] = fig
-                else: st.info("Bu metrik için veri yetersiz.")
-            else: st.info("Kıyaslama için en az 2 veri gerekli.")
+                    # Noktalar (Kurumlar)
+                    fig.add_trace(go.Scatter(
+                        x=d_p[m_col],
+                        y=d_p['gorunen_isim'],
+                        mode='markers',
+                        marker=dict(size=14, color='#1976D2', line=dict(width=1, color='white')),
+                        name='Tahmin',
+                        text=[f"{row['gorunen_isim']}: %{row[m_col]:.2f}" for i, row in d_p.iterrows()],
+                        hoverinfo='text'
+                    ))
+                    
+                    # Medyan Çizgisi (Kırmızı Dikey)
+                    fig.add_vline(x=median_val, line_width=3, line_color="red", line_dash="solid")
+                    
+                    # Medyan Etiketi (Alt Kısım)
+                    fig.add_annotation(
+                        x=median_val, y=-0.1, # Y ekseni dışında, altta
+                        text=f"MEDYAN %{median_val:.2f}",
+                        showarrow=False,
+                        font=dict(color="red", size=14, weight="bold"),
+                        yref="paper"
+                    )
 
+                    # Layout Ayarları
+                    fig.update_layout(
+                        title=f"{sel_m} - Kurum Bazlı Dağılım ({target_period})",
+                        xaxis=dict(
+                            title="Tahmin Değeri (%)",
+                            showgrid=True,
+                            gridcolor='lightgray',
+                            zeroline=False
+                        ),
+                        yaxis=dict(
+                            title="", # Kurum isimleri zaten var
+                            showgrid=True,
+                            gridcolor='lightgray'
+                        ),
+                        height=max(500, len(d_p)*35), # Dinamik yükseklik
+                        plot_bgcolor='white',
+                        margin=dict(b=50) # Alt etiket için boşluk
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    report_figures["Dagilim"] = fig
+                else: st.info("Bu dönem ve metrik için veri yok.")
+            else: st.info("Seçilen dönemde veri yok.")
+
+        # 3. KUTU GRAFİĞİ (BOX PLOT)
         with tabs[2]:
-            st.info("Tahminlerin dağılım aralığını gösterir.")
+            st.info("Tahminlerin dağılım aralığını ve yığılmaları gösterir.")
             met_map_box = {"PPK": "tahmin_ppk_faiz", "Yıl Sonu Faiz": "tahmin_yilsonu_faiz", "Aylık Enf": "tahmin_aylik_enf", "Yıl Sonu Enf": "tahmin_yilsonu_enf"}
-            sel_box_m = st.selectbox("Hangi Veri?", list(met_map_box.keys()))
+            sel_box_m = st.selectbox("Veri Seti", list(met_map_box.keys()))
             col_box = met_map_box[sel_box_m]
             
-            fig_box = px.box(df_filtered.sort_values("donem_date"), x="donem", y=col_box, color="donem", title=f"{sel_box_m} Dağılımı")
+            fig_box = px.box(df_filtered.sort_values("donem_date"), x="donem", y=col_box, color="donem", title=f"{sel_box_m} İstatistiksel Dağılımı")
             fig_box.update_layout(showlegend=False)
             st.plotly_chart(fig_box, use_container_width=True)
-            report_figures["Dagilim"] = fig_box
+            report_figures["KutuGrafik"] = fig_box
 
         st.markdown("---")
         if st.button("📄 PDF Rapor Oluştur"):
