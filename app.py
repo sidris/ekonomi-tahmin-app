@@ -17,22 +17,24 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS: Modern görünüm ve widget stilleri
 st.markdown("""
 <style>
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; border: 1px solid #e0e0e0; }
     .row-widget { padding: 10px; border-bottom: 1px solid #eee; }
     .stButton button { width: 100%; border-radius: 8px; font-weight: bold; }
+    div[data-testid="stExpander"] div[role="button"] p { font-size: 1.1rem; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
+# --- BAĞLANTI ---
 try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
     supabase: Client = create_client(url, key)
 except Exception as e:
-    st.error("Lütfen secrets ayarlarınızı kontrol edin.")
+    st.error("Lütfen .streamlit/secrets.toml dosyanızı kontrol edin.")
     st.stop()
 
 TABLE_TAHMIN = "tahminler4"
@@ -54,12 +56,14 @@ def normalize_name(name):
     return name.strip().title() if name else ""
 
 def safe_int(val):
+    """Veritabanından gelen NaN veya Float değerleri güvenli integer'a çevirir."""
     try:
         if pd.isna(val) or val is None: return 0
         return int(float(val))
     except: return 0
 
 def clean_and_sort_data(df):
+    """Veri tiplerini ve tarih sıralamasını düzeltir."""
     if df.empty: return df
     numeric_cols = [
         "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
@@ -72,14 +76,17 @@ def clean_and_sort_data(df):
         if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
     
     if "donem" in df.columns:
+        # Geçici tarih sütunu ile sıralama yap
         df["temp_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="temp_date")
         df = df.drop(columns=["temp_date"])
     return df
 
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
+    """Kullanıcı + Dönem + Tarih bazında Kayıt Ekle veya Güncelle (Upsert)"""
     date_str = forecast_date.strftime("%Y-%m-%d")
-    # Aynı gün, aynı dönem, aynı kişi kontrolü (Revizyon Yönetimi)
+    
+    # Mevcut kaydı kontrol et
     check_res = supabase.table(TABLE_TAHMIN)\
         .select("id")\
         .eq("kullanici_adi", user)\
@@ -87,6 +94,7 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
         .eq("tahmin_tarihi", date_str)\
         .execute()
 
+    # Boş değerleri None yap
     clean_data = {k: (v if v != 0 else None) for k, v in data_dict.items()}
     clean_data.update({
         "kullanici_adi": user,
@@ -105,12 +113,14 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
         return "inserted"
 
 def to_excel(df):
+    """Dataframe'i Excel bytes'a çevirir."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
 def create_pdf_report(dataframe, figures):
+    """Grafikleri ve tablo özetini PDF yapar."""
     class PDF(FPDF):
         def header(self):
             self.set_font('Helvetica', 'B', 15)
@@ -125,7 +135,9 @@ def create_pdf_report(dataframe, figures):
     pdf.set_font("Helvetica", size=12)
     pdf.set_font("Helvetica", 'B', 12)
     pdf.cell(0, 10, f"Rapor Tarihi: {pd.Timestamp.now().strftime('%Y-%m-%d')}", ln=True)
+    pdf.cell(0, 10, f"Veri Sayisi: {len(dataframe)}", ln=True)
     pdf.ln(5)
+    
     for title, fig in figures.items():
         pdf.add_page()
         pdf.set_font("Helvetica", 'B', 14)
@@ -140,7 +152,7 @@ def create_pdf_report(dataframe, figures):
         except: pass
     return bytes(pdf.output())
 
-# --- 2. GİRİŞ KONTROLÜ ---
+# --- 2. GİRİŞ KONTROLÜ (AUTH) ---
 if 'giris_yapildi' not in st.session_state:
     st.session_state['giris_yapildi'] = False
 
@@ -166,7 +178,7 @@ st.markdown("---")
 
 with st.sidebar:
     st.header("Menü")
-    page = st.radio("Git:", ["📊 Dashboard", "➕ PPK Girişi", "➕ Enflasyon Girişi", "📥 Gelişmiş Veri Havuzu", "⚙️ Düzenle / Sil", "👥 Katılımcı Yönetimi"])
+    page = st.radio("Git:", ["📊 Dashboard", "➕ PPK Girişi", "➕ Enflasyon Girişi", "📥 Gelişmiş Veri Havuzu", "⚙️ Düzenle / Sil (Admin)", "👥 Katılımcı Yönetimi"])
 
 def get_participant_selection():
     res_kat = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
@@ -174,11 +186,15 @@ def get_participant_selection():
     if df_kat.empty:
         st.error("Lütfen önce Katılımcı ekleyin.")
         return None, None, None
+    
+    # Görselleştirmede Kaynak bilgisini de göster (Reuters vb.)
     df_kat['display'] = df_kat.apply(lambda x: f"{x['ad_soyad']} ({x['anket_kaynagi']})" if x['anket_kaynagi'] else x['ad_soyad'], axis=1)
     name_map = dict(zip(df_kat['display'], df_kat['ad_soyad']))
+    
     sel_disp = st.selectbox("👤 Katılımcı Seç", df_kat["display"].unique())
     real_name = name_map[sel_disp]
     row = df_kat[df_kat["ad_soyad"] == real_name].iloc[0]
+    
     st.caption(f"🔹 Kategori: **{row['kategori']}** | 🔹 Kaynak: {row['anket_kaynagi'] or '-'}")
     return real_name, row['kategori'], sel_disp
 
@@ -193,17 +209,19 @@ if page == "➕ PPK Girişi":
             with c1: kullanici, kategori, display_name = get_participant_selection()
             with c2: donem = st.selectbox("📅 Dönem", tum_donemler, index=tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0)
             with c3: tahmin_tarihi = st.date_input("📆 Tahmin Tarihi", datetime.date.today())
+            
             kaynak_link = st.text_input("🔗 Kaynak Web Linki (Opsiyonel)", placeholder="https://...")
             st.markdown("---")
+            
             c_ppk1, c_ppk2 = st.columns(2)
             with c_ppk1:
                 st.markdown("### 1. Bu Ayki Karar")
-                val_faiz = st.number_input("Medyan %", step=0.25, format="%.2f")
+                val_faiz = st.number_input("Medyan % (Bu Ay)", step=0.25, format="%.2f")
             with c_ppk2:
                 st.markdown("### 2. Sene Sonu Beklenti")
-                val_ys_faiz = st.number_input("Medyan % (YS)", step=0.25, format="%.2f", key="ys_f")
+                val_ys_faiz = st.number_input("Medyan % (Sene Sonu)", step=0.25, format="%.2f", key="ys_f")
             
-            with st.expander("📉 Min / Max & Katılımcı Sayısı"):
+            with st.expander("📉 Min / Max & Katılımcı Sayısı (Opsiyonel)"):
                 ec1, ec2, ec3 = st.columns(3)
                 with ec1:
                     min_faiz = st.number_input("Min %", step=0.25, format="%.2f")
@@ -216,7 +234,11 @@ if page == "➕ PPK Girişi":
             
             if st.form_submit_button("✅ Veriyi Kaydet"):
                 if kullanici:
-                    data = {"tahmin_ppk_faiz": val_faiz, "min_ppk_faiz": min_faiz, "max_ppk_faiz": max_faiz, "tahmin_yilsonu_faiz": val_ys_faiz, "min_yilsonu_faiz": min_ys_faiz, "max_yilsonu_faiz": max_ys_faiz, "katilimci_sayisi": int(kat_sayisi) if kat_sayisi > 0 else 0}
+                    data = {
+                        "tahmin_ppk_faiz": val_faiz, "min_ppk_faiz": min_faiz, "max_ppk_faiz": max_faiz,
+                        "tahmin_yilsonu_faiz": val_ys_faiz, "min_yilsonu_faiz": min_ys_faiz, "max_yilsonu_faiz": max_ys_faiz,
+                        "katilimci_sayisi": int(kat_sayisi) if kat_sayisi > 0 else 0
+                    }
                     status = upsert_tahmin(kullanici, donem, kategori, tahmin_tarihi, kaynak_link, data)
                     st.toast("Kayıt Başarılı!", icon="🎉" if status == "inserted" else "🔄")
                 else: st.error("Katılımcı seçiniz.")
@@ -232,13 +254,16 @@ elif page == "➕ Enflasyon Girişi":
             with c1: kullanici, kategori, display_name = get_participant_selection()
             with c2: donem = st.selectbox("📅 Dönem", tum_donemler, index=tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0)
             with c3: tahmin_tarihi = st.date_input("📆 Tahmin Tarihi", datetime.date.today())
+            
             kaynak_link = st.text_input("🔗 Kaynak Web Linki (Opsiyonel)", placeholder="https://...")
             st.markdown("---")
+            
             c_main1, c_main2, c_main3 = st.columns(3)
             with c_main1: v_ay = st.number_input("1. Aylık TÜFE (Medyan)", step=0.1, key="v_ay")
             with c_main2: v_yil = st.number_input("2. Yıllık TÜFE (Medyan)", step=0.1, key="v_yi")
             with c_main3: v_ys = st.number_input("3. Yıl Sonu TÜFE (Medyan)", step=0.1, key="v_ys")
-            with st.expander("📉 Min / Max & Katılımcı Sayısı"):
+            
+            with st.expander("📉 Min / Max & Katılımcı Sayısı (Opsiyonel)"):
                 ec1, ec2, ec3 = st.columns(3)
                 with ec1:
                     min_ay = st.number_input("Min Aylık", step=0.1)
@@ -250,16 +275,21 @@ elif page == "➕ Enflasyon Girişi":
                     min_ys = st.number_input("Min YS", step=0.1)
                     max_ys = st.number_input("Max YS", step=0.1)
                     st.markdown("---")
-                    kat_sayisi = st.number_input("Katılımcı (N)", min_value=0, step=1)
+                    kat_sayisi = st.number_input("Katılımcı Sayısı (N)", min_value=0, step=1)
             
             if st.form_submit_button("✅ Veriyi Kaydet"):
                 if kullanici:
-                    data = {"tahmin_aylik_enf": v_ay, "min_aylik_enf": min_ay, "max_aylik_enf": max_ay, "tahmin_yillik_enf": v_yil, "min_yillik_enf": min_yil, "max_yillik_enf": max_yil, "tahmin_yilsonu_enf": v_ys, "min_yilsonu_enf": min_ys, "max_yilsonu_enf": max_ys, "katilimci_sayisi": int(kat_sayisi) if kat_sayisi > 0 else 0}
+                    data = {
+                        "tahmin_aylik_enf": v_ay, "min_aylik_enf": min_ay, "max_aylik_enf": max_ay,
+                        "tahmin_yillik_enf": v_yil, "min_yillik_enf": min_yil, "max_yillik_enf": max_yil,
+                        "tahmin_yilsonu_enf": v_ys, "min_yilsonu_enf": min_ys, "max_yilsonu_enf": max_ys,
+                        "katilimci_sayisi": int(kat_sayisi) if kat_sayisi > 0 else 0
+                    }
                     status = upsert_tahmin(kullanici, donem, kategori, tahmin_tarihi, kaynak_link, data)
                     st.toast("Kayıt Başarılı!", icon="🎉" if status == "inserted" else "🔄")
 
 # ========================================================
-# SAYFA: GELİŞMİŞ VERİ HAVUZU VE EXCEL
+# SAYFA: GELİŞMİŞ VERİ HAVUZU (EXCEL)
 # ========================================================
 elif page == "📥 Gelişmiş Veri Havuzu":
     st.header("🗃️ Gelişmiş Veri Havuzu")
@@ -279,24 +309,32 @@ elif page == "📥 Gelişmiş Veri Havuzu":
             df_full['anket_kaynagi'] = df_full['anket_kaynagi'].fillna('-')
             df_full['tahmin_tarihi'] = pd.to_datetime(df_full['tahmin_tarihi'])
 
-            with st.expander("🔍 Gelişmiş Filtreleme Seçenekleri", expanded=True):
+            with st.expander("🔍 Filtreleme Seçenekleri", expanded=True):
                 f_col1, f_col2, f_col3 = st.columns(3)
+                
                 with f_col1:
                     sel_cat = st.selectbox("Kategori", ["Tümü"] + list(df_full['kategori'].unique()))
                     sel_period = st.selectbox("Dönem", ["Tümü"] + sorted(list(df_full['donem'].unique()), reverse=True))
+                
                 with f_col2:
-                    sel_user = st.selectbox("Katılımcı", ["Tümü"] + sorted(list(df_full['kullanici_adi'].unique())))
-                    sel_source = st.selectbox("Kaynak", ["Tümü"] + sorted(list(df_full['anket_kaynagi'].unique())))
+                    sorted_users = sorted(list(df_full['kullanici_adi'].unique()))
+                    sel_user = st.selectbox("Katılımcı / Kurum Adı", ["Tümü"] + sorted_users)
+                
                 with f_col3:
-                    min_date, max_date = df_full['tahmin_tarihi'].min().date(), df_full['tahmin_tarihi'].max().date()
-                    date_range = st.date_input("Tarih Aralığı", [min_date, max_date])
+                    if not df_full['tahmin_tarihi'].isnull().all():
+                        min_date = df_full['tahmin_tarihi'].min().date()
+                        max_date = df_full['tahmin_tarihi'].max().date()
+                        date_range = st.date_input("Giriş Tarihi Aralığı", [min_date, max_date])
+                    else:
+                        date_range = []
 
+            # Filtre Uygulama
             df_filtered = df_full.copy()
             if sel_cat != "Tümü": df_filtered = df_filtered[df_filtered['kategori'] == sel_cat]
             if sel_period != "Tümü": df_filtered = df_filtered[df_filtered['donem'] == sel_period]
             if sel_user != "Tümü": df_filtered = df_filtered[df_filtered['kullanici_adi'] == sel_user]
-            if sel_source != "Tümü": df_filtered = df_filtered[df_filtered['anket_kaynagi'] == sel_source]
-            if len(date_range) == 2: df_filtered = df_filtered[(df_filtered['tahmin_tarihi'].dt.date >= date_range[0]) & (df_filtered['tahmin_tarihi'].dt.date <= date_range[1])]
+            if len(date_range) == 2: 
+                df_filtered = df_filtered[(df_filtered['tahmin_tarihi'].dt.date >= date_range[0]) & (df_filtered['tahmin_tarihi'].dt.date <= date_range[1])]
 
             st.markdown(f"### 📋 Sonuç Listesi ({len(df_filtered)} Kayıt)")
             column_cfg = {
@@ -307,7 +345,9 @@ elif page == "📥 Gelişmiş Veri Havuzu":
                 "tahmin_aylik_enf": st.column_config.NumberColumn("Ay Enf", format="%.2f%%"),
                 "tahmin_yilsonu_enf": st.column_config.NumberColumn("YS Enf", format="%.2f%%"),
             }
-            display_cols = ['tahmin_tarihi', 'donem', 'kullanici_adi', 'kategori', 'anket_kaynagi', 'kaynak_link', 'tahmin_ppk_faiz', 'tahmin_yilsonu_faiz', 'tahmin_aylik_enf', 'tahmin_yilsonu_enf', 'katilimci_sayisi']
+            display_cols = ['tahmin_tarihi', 'donem', 'kullanici_adi', 'kategori', 'anket_kaynagi', 'kaynak_link', 
+                            'tahmin_ppk_faiz', 'tahmin_yilsonu_faiz', 'tahmin_aylik_enf', 'tahmin_yilsonu_enf', 'katilimci_sayisi']
+            
             st.dataframe(df_filtered[[c for c in display_cols if c in df_filtered.columns]].sort_values(by="tahmin_tarihi", ascending=False), column_config=column_cfg, use_container_width=True, height=500)
 
             st.markdown("---")
@@ -315,7 +355,12 @@ elif page == "📥 Gelişmiş Veri Havuzu":
                 df_export = df_filtered.copy()
                 df_export['tahmin_tarihi'] = df_export['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
                 excel_data = to_excel(df_export)
-                st.download_button(label="📥 Tabloyu Excel Olarak İndir", data=excel_data, file_name=f"Veri_Havuzu_{datetime.date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+                
+                # Dosya adına kullanıcı adını ekle
+                file_label = sel_user if sel_user != "Tümü" else "Tum_Veriler"
+                file_name = f"Veri_Havuzu_{file_label}_{datetime.date.today()}.xlsx"
+                
+                st.download_button(label="📥 Tabloyu Excel Olarak İndir", data=excel_data, file_name=file_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
     else: st.info("Sistemde henüz hiç veri yok.")
 
 # ========================================================
@@ -330,14 +375,19 @@ elif page == "📊 Dashboard":
 
     if not df_tahmin.empty and not df_kat.empty:
         df_tahmin = clean_and_sort_data(df_tahmin)
+        # En güncel veriyi al (Last revision)
         df_tahmin['tahmin_tarihi'] = pd.to_datetime(df_tahmin['tahmin_tarihi'])
         df_tahmin = df_tahmin.sort_values(by='tahmin_tarihi')
         df_latest = df_tahmin.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
+        
+        # Inner join ile sadece aktif katılımcıları al
         df = pd.merge(df_latest, df_kat, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+        
         df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
         df['hover_text'] = df.apply(lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}" if pd.notnull(x['katilimci_sayisi']) else "", axis=1)
         df['kategori'] = df['kategori'].fillna('Bireysel')
         
+        # KPI
         kpi1, kpi2, kpi3 = st.columns(3)
         kpi1.metric("Toplam Katılımcı", df['kullanici_adi'].nunique())
         kpi2.metric("Toplam Tahmin Sayısı", len(df))
@@ -345,7 +395,7 @@ elif page == "📊 Dashboard":
         st.markdown("---")
 
         with st.sidebar:
-            st.markdown("### 🔍 Filtreleme")
+            st.markdown("### 🔍 Dashboard Filtreleri")
             cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
             users_in_cat = df[df['kategori'].isin(cat_filter)]['gorunen_isim'].unique()
             user_filter = st.multiselect("Katılımcı", sorted(users_in_cat), default=sorted(users_in_cat))
@@ -357,6 +407,7 @@ elif page == "📊 Dashboard":
 
         report_figures = {}
         tab_ts, tab_dev = st.tabs(["📈 Zaman Serisi", "🍭 Medyan Sapma"])
+        
         with tab_ts:
             def plot_w_range(df_sub, y_col, min_c, max_c, title):
                 fig = px.line(df_sub, x="donem", y=y_col, color="gorunen_isim", markers=True, title=title, hover_data=["hover_text"])
@@ -368,6 +419,7 @@ elif page == "📊 Dashboard":
                         fig.add_trace(go.Scatter(x=ud['donem'], y=ud[y_col], mode='markers', error_y=dict(type='data', symmetric=False, array=ud[max_c]-ud[y_col], arrayminus=ud[y_col]-ud[min_c], color='gray', width=3), showlegend=False, hoverinfo='skip', marker=dict(size=0, opacity=0)))
                 st.plotly_chart(fig, use_container_width=True)
                 return fig
+            
             c1, c2 = st.columns(2)
             with c1: report_figures["PPK"] = plot_w_range(df_filtered, "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar")
             with c2: report_figures["Sene Sonu Faiz"] = plot_w_range(df_filtered, "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz")
@@ -406,14 +458,14 @@ elif page == "📊 Dashboard":
 # ========================================================
 # SAYFA: DÜZENLE / SİL (ADMIN AUTHENTICATION)
 # ========================================================
-elif page == "⚙️ Düzenle / Sil":
+elif page == "⚙️ Düzenle / Sil (Admin)":
     st.header("⚙️ Yönetici Paneli")
     
     if 'admin_auth' not in st.session_state: st.session_state['admin_auth'] = False
         
     if not st.session_state['admin_auth']:
-        st.info("İşlem yapmak için şifre gereklidir.")
-        # Filtreleme
+        st.info("İşlem yapmak için ilgili kaydın yanındaki butona basıp şifre giriniz.")
+        
         filter_col1, filter_col2 = st.columns(2)
         with filter_col1:
             res_users = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
@@ -440,6 +492,7 @@ elif page == "⚙️ Düzenle / Sil":
                     c1.write(f"{row['donem']} ({row.get('tahmin_tarihi')})")
                     c2.write(row['kullanici_adi'])
                     c3.caption(f"PPK: {row.get('tahmin_ppk_faiz') or '-'} | YS Faiz: {row.get('tahmin_yilsonu_faiz') or '-'} | Enf: {row.get('tahmin_aylik_enf') or '-'}")
+                    
                     if c4.button("✏️", key=f"e_{row['id']}"):
                         st.session_state['target_id'] = row['id']; st.session_state['action'] = 'edit'; st.rerun()
                     if c5.button("🗑️", key=f"d_{row['id']}"):
@@ -464,21 +517,34 @@ elif page == "⚙️ Düzenle / Sil":
                     curr_date = pd.to_datetime(target.get('tahmin_tarihi')).date() if target.get('tahmin_tarihi') else datetime.date.today()
                     nd = st.date_input("Tarih", curr_date)
                     nl = st.text_input("Link", target.get('kaynak_link') or "")
+                    
                     def g(k): return float(target.get(k) or 0)
+                    # Tüm alanları düzenleme
                     c1, c2 = st.columns(2)
-                    with c1: nf=st.number_input("PPK", value=g('tahmin_ppk_faiz'), step=0.25); nysf=st.number_input("YS Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25)
-                    with c2: na=st.number_input("Ay Enf", value=g('tahmin_aylik_enf'), step=0.1); nyse=st.number_input("YS Enf", value=g('tahmin_yilsonu_enf'), step=0.1)
+                    with c1: 
+                        nf=st.number_input("PPK", value=g('tahmin_ppk_faiz'), step=0.25)
+                        nysf=st.number_input("YS Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25)
+                        nkat=st.number_input("N", value=safe_int(target.get('katilimci_sayisi')), step=1)
+                    with c2: 
+                        na=st.number_input("Ay Enf", value=g('tahmin_aylik_enf'), step=0.1)
+                        nyse=st.number_input("YS Enf", value=g('tahmin_yilsonu_enf'), step=0.1)
                     
                     if st.form_submit_button("💾 Kaydet"):
                         def cv(v): return v if v!=0 else None
-                        upd = {"tahmin_tarihi": nd.strftime('%Y-%m-%d'), "kaynak_link": nl if nl else None, "tahmin_ppk_faiz": cv(nf), "tahmin_yilsonu_faiz": cv(nysf), "tahmin_aylik_enf": cv(na), "tahmin_yilsonu_enf": cv(nyse)}
+                        upd = {
+                            "tahmin_tarihi": nd.strftime('%Y-%m-%d'),
+                            "kaynak_link": nl if nl else None,
+                            "tahmin_ppk_faiz": cv(nf), "tahmin_yilsonu_faiz": cv(nysf),
+                            "tahmin_aylik_enf": cv(na), "tahmin_yilsonu_enf": cv(nyse),
+                            "katilimci_sayisi": int(nkat) if nkat > 0 else 0
+                        }
                         supabase.table(TABLE_TAHMIN).update(upd).eq("id", rec_id).execute()
                         del st.session_state['admin_auth']; del st.session_state['target_id']; del st.session_state['action']; st.rerun()
 
             elif st.session_state['action'] == 'del':
                 st.error(f"SİLİNECEK: {target['kullanici_adi']} - {target['donem']}")
                 c1, c2 = st.columns(2)
-                if c1.button("✅ Evet"):
+                if c1.button("✅ Evet, Sil"):
                     supabase.table(TABLE_TAHMIN).delete().eq("id", rec_id).execute()
                     del st.session_state['admin_auth']; del st.session_state['target_id']; del st.session_state['action']; st.rerun()
                 if c2.button("❌ İptal"):
