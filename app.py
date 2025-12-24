@@ -25,6 +25,7 @@ st.markdown("""
     .stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
     h1, h2, h3 { color: #2c3e50; }
+    /* Tablo genişlik ayarı */
     div[data-testid="stDataFrame"] { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
@@ -76,6 +77,7 @@ def clean_and_sort_data(df):
     for col in numeric_cols:
         if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
     
+    # Sıralama için geçici tarih sütunu (Grafiklerde düzgün sıra için)
     if "donem" in df.columns:
         df["donem_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="donem_date")
@@ -158,7 +160,7 @@ def get_participant_selection():
     return name_map[sel], row['kategori'], sel
 
 # ========================================================
-# SAYFA: GELİŞMİŞ VERİ HAVUZU
+# SAYFA: GELİŞMİŞ VERİ HAVUZU (YÖNETİM & EXCEL)
 # ========================================================
 if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
@@ -228,12 +230,21 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                         t = st.session_state['edit_target']
                         st.markdown("---")
                         st.markdown(f"### ✏️ Düzenleniyor: {t['kullanici_adi']} ({t['donem']})")
+                        
                         with st.form("full_edit_form"):
-                            c1, c2 = st.columns(2)
+                            # Tarih, Dönem, Link
+                            c1, c2, c3 = st.columns(3)
                             curr_date = pd.to_datetime(t.get('tahmin_tarihi')).date() if t.get('tahmin_tarihi') else datetime.date.today()
-                            new_date = c1.date_input("Tarih", curr_date)
-                            new_link = c2.text_input("Link", t.get('kaynak_link') or "")
+                            
+                            new_date = c1.date_input("Giriş Tarihi", curr_date)
+                            # DÖNEM DÜZENLEME EKLENDİ
+                            current_donem_idx = tum_donemler.index(t['donem']) if t['donem'] in tum_donemler else 0
+                            new_donem = c2.selectbox("Dönem", tum_donemler, index=current_donem_idx)
+                            
+                            new_link = c3.text_input("Link", t.get('kaynak_link') or "")
+                            
                             def g(k): return float(t.get(k) or 0)
+                            
                             tab_ppk, tab_enf = st.tabs(["🏦 Faiz Verileri", "🏷️ Enflasyon Verileri"])
                             with tab_ppk:
                                 c_p1, c_p2, c_p3 = st.columns(3)
@@ -261,20 +272,26 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 n_yse = cys1.number_input("YS Enf Medyan", value=g('tahmin_yilsonu_enf'), step=0.1)
                                 min_yse = cys2.number_input("YS Enf Min", value=g('min_yilsonu_enf'), step=0.1)
                                 max_yse = cys3.number_input("YS Enf Max", value=g('max_yilsonu_enf'), step=0.1)
+                            
                             c_b1, c_b2 = st.columns([1,1])
                             if c_b1.form_submit_button("💾 Kaydet ve Listeye Dön", type="primary"):
                                 def cv(v): return v if v!=0 else None
                                 upd = {
-                                    "tahmin_tarihi": new_date.strftime('%Y-%m-%d'), "kaynak_link": new_link if new_link else None, "katilimci_sayisi": int(n_kat) if n_kat>0 else 0,
+                                    "tahmin_tarihi": new_date.strftime('%Y-%m-%d'), 
+                                    "donem": new_donem, # Dönem güncelleme eklendi
+                                    "kaynak_link": new_link if new_link else None, 
+                                    "katilimci_sayisi": int(n_kat) if n_kat>0 else 0,
                                     "tahmin_ppk_faiz": cv(n_ppk), "min_ppk_faiz": cv(min_ppk), "max_ppk_faiz": cv(max_ppk),
                                     "tahmin_yilsonu_faiz": cv(n_ysf), "min_yilsonu_faiz": cv(min_ysf), "max_yilsonu_faiz": cv(max_ysf),
                                     "tahmin_aylik_enf": cv(n_ay), "min_aylik_enf": cv(min_ay), "max_aylik_enf": cv(max_ay),
                                     "tahmin_yillik_enf": cv(n_yil), "min_yillik_enf": cv(min_yil), "max_yillik_enf": cv(max_yil),
                                     "tahmin_yilsonu_enf": cv(n_yse), "min_yilsonu_enf": cv(min_yse), "max_yilsonu_enf": cv(max_yse),
                                 }
-                                supabase.table(TABLE_TAHMIN).update(upd).eq("id", t['id']).execute()
+                                # ID'yi int'e çevirerek gönderiyoruz (Line 275 Hatası Çözümü)
+                                supabase.table(TABLE_TAHMIN).update(upd).eq("id", int(t['id'])).execute()
                                 del st.session_state['edit_target']
                                 st.rerun()
+                        
                         if st.button("❌ İptal"):
                             del st.session_state['edit_target']
                             st.rerun()
@@ -296,7 +313,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                     st.session_state['edit_target'] = row
                                     st.rerun()
                                 if c_act2.button("🗑️ Sil", key=f"d_{row['id']}"):
-                                    supabase.table(TABLE_TAHMIN).delete().eq("id", row['id']).execute()
+                                    supabase.table(TABLE_TAHMIN).delete().eq("id", int(row['id'])).execute()
                                     st.toast("Kayıt Silindi"); time.sleep(1); st.rerun()
 
 # ========================================================
@@ -315,10 +332,9 @@ elif page == "Dashboard":
         # Sort by actual date for latest record logic
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # Her dönem ve kullanıcı için son girilen veriyi al
         df_latest = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
-        
         df = pd.merge(df_latest, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+        
         df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
         df['hover_text'] = df.apply(lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}" if pd.notnull(x['katilimci_sayisi']) else "", axis=1)
         df['kategori'] = df['kategori'].fillna('Bireysel')
@@ -331,29 +347,29 @@ elif page == "Dashboard":
 
         with st.sidebar:
             st.markdown("### 🔍 Dashboard Filtreleri")
-            # Medyan Hesaplama Seçeneği
-            calc_method = st.radio("Medyan Hesaplama", ["Otomatik", "Manuel"], help="Kırmızı medyan çizgisini otomatik hesapla veya elle gir.")
+            calc_method = st.radio("Medyan Hesaplama", ["Otomatik", "Manuel"])
             manual_median_val = 0.0
             if calc_method == "Manuel":
-                manual_median_val = st.number_input("Manuel Medyan Değeri", step=0.01, format="%.2f")
-            
+                manual_median_val = st.number_input("Manuel Değer", step=0.01, format="%.2f")
             st.markdown("---")
             cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
             users_in_cat = df[df['kategori'].isin(cat_filter)]['gorunen_isim'].unique()
             user_filter = st.multiselect("Katılımcı", sorted(users_in_cat), default=sorted(users_in_cat))
+            
+            # Yıl filtresi
             df['yil'] = df['donem'].apply(lambda x: x.split('-')[0])
             year_filter = st.multiselect("Yıl", sorted(df['yil'].unique()), default=sorted(df['yil'].unique()))
 
         df_filtered = df[df['kategori'].isin(cat_filter) & df['gorunen_isim'].isin(user_filter) & df['yil'].isin(year_filter)]
         if df_filtered.empty: st.warning("Veri bulunamadı."); st.stop()
 
-        tabs = st.tabs(["📈 Zaman Serisi", "📍 Dağılım Analizi (Dot Plot)", "📦 Kutu Grafiği"])
+        tabs = st.tabs(["📈 Zaman Serisi", "📍 Dağılım Analizi", "📦 Kutu Grafiği"])
         report_figures = {}
 
-        # 1. ZAMAN SERİSİ
+        # 1. ZAMAN SERİSİ (Düzeltildi: X ekseni 'donem' stringi, ama sıralı)
         with tabs[0]:
             def plot_chart(y_col, min_c, max_c, title):
-                # donem_date ile sıralı çizim yapalım (String sıralama hatasını önler)
+                # donem_date ile sıralıyoruz, ama x eksenine 'donem' veriyoruz
                 fig = px.line(df_filtered.sort_values("donem_date"), x="donem", y=y_col, color="gorunen_isim", markers=True, title=title, hover_data=["hover_text"])
                 df_r = df_filtered.dropna(subset=[min_c, max_c])
                 for u in df_r['gorunen_isim'].unique():
@@ -369,91 +385,35 @@ elif page == "Dashboard":
             with c3: report_figures["Ay Enf"] = plot_chart("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enflasyon")
             with c4: report_figures["YS Enf"] = plot_chart("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enflasyon")
 
-        # 2. DAĞILIM (DOT PLOT - ISTENEN GORSEL)
+        # 2. DAĞILIM
         with tabs[1]:
-            # Dönem Seçimi
             all_periods = sorted(list(df_filtered['donem'].unique()), reverse=True)
-            target_period = st.selectbox("Analiz Dönemi Seç", all_periods, key="dot_period")
-            
-            # Veri Filtreleme
+            target_period = st.selectbox("Dönem Seç", all_periods, key="dot_period")
             d_p = df_filtered[df_filtered['donem'] == target_period].copy()
-            
             if len(d_p) > 0:
                 met_map = {"PPK": "tahmin_ppk_faiz", "Enflasyon (Aylık)": "tahmin_aylik_enf", "YS Enflasyon": "tahmin_yilsonu_enf"}
-                sel_m = st.radio("Analiz Metriği", list(met_map.keys()), horizontal=True)
+                sel_m = st.radio("Metrik", list(met_map.keys()), horizontal=True)
                 m_col = met_map[sel_m]
-                
-                # NaN Temizliği
                 d_p = d_p.dropna(subset=[m_col])
-                
                 if len(d_p) > 0:
-                    # Medyan Hesabı
-                    if calc_method == "Manuel":
-                        median_val = manual_median_val
-                    else:
-                        median_val = d_p[m_col].median()
-                    
-                    # Sıralama: Değere göre (Küçükten büyüğe - Görseldeki gibi)
+                    median_val = manual_median_val if calc_method == "Manuel" else d_p[m_col].median()
                     d_p = d_p.sort_values(by=m_col, ascending=True)
-                    
-                    # Grafik
                     fig = go.Figure()
-                    
-                    # Noktalar (Kurumlar)
-                    fig.add_trace(go.Scatter(
-                        x=d_p[m_col],
-                        y=d_p['gorunen_isim'],
-                        mode='markers',
-                        marker=dict(size=14, color='#1976D2', line=dict(width=1, color='white')),
-                        name='Tahmin',
-                        text=[f"{row['gorunen_isim']}: %{row[m_col]:.2f}" for i, row in d_p.iterrows()],
-                        hoverinfo='text'
-                    ))
-                    
-                    # Medyan Çizgisi (Kırmızı Dikey)
-                    fig.add_vline(x=median_val, line_width=3, line_color="red", line_dash="solid")
-                    
-                    # Medyan Etiketi (Alt Kısım)
-                    fig.add_annotation(
-                        x=median_val, y=-0.1, # Y ekseni dışında, altta
-                        text=f"MEDYAN %{median_val:.2f}",
-                        showarrow=False,
-                        font=dict(color="red", size=14, weight="bold"),
-                        yref="paper"
-                    )
-
-                    # Layout Ayarları
-                    fig.update_layout(
-                        title=f"{sel_m} - Kurum Bazlı Dağılım ({target_period})",
-                        xaxis=dict(
-                            title="Tahmin Değeri (%)",
-                            showgrid=True,
-                            gridcolor='lightgray',
-                            zeroline=False
-                        ),
-                        yaxis=dict(
-                            title="", # Kurum isimleri zaten var
-                            showgrid=True,
-                            gridcolor='lightgray'
-                        ),
-                        height=max(500, len(d_p)*35), # Dinamik yükseklik
-                        plot_bgcolor='white',
-                        margin=dict(b=50) # Alt etiket için boşluk
-                    )
-                    
+                    fig.add_trace(go.Scatter(x=d_p[m_col], y=d_p['gorunen_isim'], mode='markers', marker=dict(size=14, color='#1976D2', line=dict(width=1, color='white')), name='Tahmin', text=[f"{row['gorunen_isim']}: %{row[m_col]:.2f}" for i, row in d_p.iterrows()], hoverinfo='text'))
+                    fig.add_vline(x=median_val, line_width=3, line_color="red")
+                    fig.add_annotation(x=median_val, y=-0.1, text=f"MEDYAN %{median_val:.2f}", showarrow=False, font=dict(color="red", size=14, weight="bold"), yref="paper")
+                    fig.update_layout(title=f"{sel_m} Dağılımı ({target_period})", height=max(500, len(d_p)*35), xaxis_title="Tahmin Değeri (%)")
                     st.plotly_chart(fig, use_container_width=True)
                     report_figures["Dagilim"] = fig
-                else: st.info("Bu dönem ve metrik için veri yok.")
-            else: st.info("Seçilen dönemde veri yok.")
+                else: st.info("Veri yok.")
+            else: st.info("Veri yok.")
 
-        # 3. KUTU GRAFİĞİ (BOX PLOT)
+        # 3. KUTU GRAFİĞİ
         with tabs[2]:
-            st.info("Tahminlerin dağılım aralığını ve yığılmaları gösterir.")
             met_map_box = {"PPK": "tahmin_ppk_faiz", "Yıl Sonu Faiz": "tahmin_yilsonu_faiz", "Aylık Enf": "tahmin_aylik_enf", "Yıl Sonu Enf": "tahmin_yilsonu_enf"}
             sel_box_m = st.selectbox("Veri Seti", list(met_map_box.keys()))
             col_box = met_map_box[sel_box_m]
-            
-            fig_box = px.box(df_filtered.sort_values("donem_date"), x="donem", y=col_box, color="donem", title=f"{sel_box_m} İstatistiksel Dağılımı")
+            fig_box = px.box(df_filtered.sort_values("donem_date"), x="donem", y=col_box, color="donem", title=f"{sel_box_m} Dağılımı")
             fig_box.update_layout(showlegend=False)
             st.plotly_chart(fig_box, use_container_width=True)
             report_figures["KutuGrafik"] = fig_box
