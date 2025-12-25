@@ -145,10 +145,10 @@ if not st.session_state['giris_yapildi']:
             st.session_state['giris_yapildi'] = True; st.rerun()
         st.stop()
 
-# --- SIDEBAR ---
+# --- SIDEBAR & PAGE SELECTION ---
 with st.sidebar:
     st.title("📊 Menü")
-    # BURADA page DEĞİŞKENİ TANIMLANIYOR, AŞAĞIDAKİ IF/ELIF ZİNCİRİ BUNA BAĞLI
+    # BU SATIR KRİTİKTİR - page değişkenini tanımlar
     page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
 
 def get_participant_selection():
@@ -253,12 +253,11 @@ elif page == "Dashboard":
 
     if not df_t.empty and not df_k.empty:
         df_t = clean_and_sort_data(df_t)
+        df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
+        df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # 1. Full History (Revizyonlar)
         df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
-        
-        # 2. Latest Data (Karşılaştırma)
-        df_latest_raw = df_t.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
+        df_latest_raw = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df_latest = pd.merge(df_latest_raw, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         
         for d in [df_history, df_latest]:
@@ -293,12 +292,7 @@ elif page == "Dashboard":
             target_df = df_history[df_history['gorunen_isim'].isin(usr_filter) & df_history['yil'].isin(yr_filter)].copy()
             x_axis_col = "tahmin_tarihi"; x_label = "Tahmin Giriş Tarihi"; sort_col = "tahmin_tarihi"; tick_format = "%d-%m-%Y"
         else:
-            target_df = df_latest[
-                df_latest['kategori'].isin(cat_filter) & 
-                df_latest['anket_kaynagi'].isin(src_filter) & 
-                df_latest['gorunen_isim'].isin(usr_filter) & 
-                df_latest['yil'].isin(yr_filter)
-            ].copy()
+            target_df = df_latest[df_latest['kategori'].isin(cat_filter) & df_latest['anket_kaynagi'].isin(src_filter) & df_latest['gorunen_isim'].isin(usr_filter) & df_latest['yil'].isin(yr_filter)].copy()
             x_axis_col = "donem"; x_label = "Hedef Dönem"; sort_col = "donem_date"; tick_format = None
 
         if target_df.empty: st.warning("Veri bulunamadı."); st.stop()
@@ -347,7 +341,6 @@ elif page == "Dashboard":
         with tabs[2]:
             mb = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
             sb = st.selectbox("Veri Seti", list(mb.keys()))
-            # Box plot her zaman dönem bazlı dağılımı gösterir
             fig = px.box(target_df.sort_values("donem_date"), x="donem", y=mb[sb], color="donem", title=f"{sb} Dağılımı")
             st.plotly_chart(fig, use_container_width=True)
 
@@ -356,7 +349,7 @@ elif page == "Dashboard":
             st.download_button("⬇️ İndir", create_pdf_report(target_df, report_figures), "Rapor.pdf", "application/pdf")
 
 # ========================================================
-# SAYFA: ISI HARİTASI (GELİŞMİŞ)
+# SAYFA: ISI HARİTASI (GELİŞMİŞ VERSİYON)
 # ========================================================
 elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
