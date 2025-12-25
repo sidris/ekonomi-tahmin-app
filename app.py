@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from fpdf import FPDF
-from fpdf.fonts import FontFace  # Tablo stilleri için gerekli
+from fpdf.fonts import FontFace
 import tempfile
 import os
 import io
@@ -118,103 +118,113 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- GELİŞMİŞ PDF MOTORU (TÜRKÇE & LOGO) ---
+# --- GELİŞMİŞ PDF MOTORU (OPEN SANS + HATA YÖNETİMİ) ---
 def check_and_download_font():
-    """Türkçe karakter destekleyen fontu indirir."""
-    font_path = "DejaVuSans.ttf"
-    font_bold_path = "DejaVuSans-Bold.ttf"
+    """Google Fonts'tan Open Sans indirir. Hata olursa None döner."""
+    font_files = {
+        "OpenSans-Regular.ttf": "https://github.com/google/fonts/raw/main/apache/opensans/OpenSans-Regular.ttf",
+        "OpenSans-Bold.ttf": "https://github.com/google/fonts/raw/main/apache/opensans/OpenSans-Bold.ttf"
+    }
     
-    if not os.path.exists(font_path):
-        url = "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Regular.ttf"
-        try:
-            r = requests.get(url)
-            with open(font_path, 'wb') as f: f.write(r.content)
-        except: pass
+    paths = {}
+    for name, url in font_files.items():
+        if not os.path.exists(name):
+            try:
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    with open(name, 'wb') as f:
+                        f.write(r.content)
+            except:
+                pass # İndirme başarısızsa dosya oluşmaz
         
-    if not os.path.exists(font_bold_path):
-        url = "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Bold.ttf"
-        try:
-            r = requests.get(url)
-            with open(font_bold_path, 'wb') as f: f.write(r.content)
-        except: pass
-    
-    return font_path, font_bold_path
+        # Dosya var mı ve boyutu geçerli mi (>0) kontrol et
+        if os.path.exists(name) and os.path.getsize(name) > 0:
+            paths[name] = name
+        else:
+            return None, None # Bir font bile eksikse standart fonta dön
+
+    return paths["OpenSans-Regular.ttf"], paths["OpenSans-Bold.ttf"]
 
 def create_custom_pdf_report(report_data):
-    """
-    report_data = {'title', 'unit', 'date', 'body', 'content_blocks':list}
-    """
+    # Fontları kontrol et
     font_reg, font_bold = check_and_download_font()
+    
+    # Font yüklenemediyse varsayılan fonta dön (Türkçe karakterler bozuk çıkabilir ama hata vermez)
+    use_custom_font = (font_reg is not None and font_bold is not None)
+    font_family = "OpenSans" if use_custom_font else "Helvetica"
 
     class TCMBReport(FPDF):
         def header(self):
-            # Logo (PNG kullanıyoruz çünkü FPDF SVG desteklemez)
-            # TCMB Logosuna benzer temiz bir PNG linki
+            # Logo
             logo_url = "https://upload.wikimedia.org/wikipedia/tr/a/a2/T%C3%BCrkiye_Cumhuriyet_Merkez_Bankas%C4%B1_logosu.png"
             logo_path = "temp_logo.png"
             
             if not os.path.exists(logo_path):
                 try:
-                    r = requests.get(logo_url, verify=False)
-                    with open(logo_path, 'wb') as f: f.write(r.content)
+                    r = requests.get(logo_url, verify=False, timeout=5)
+                    if r.status_code == 200:
+                        with open(logo_path, 'wb') as f: f.write(r.content)
                 except: pass
                 
             if os.path.exists(logo_path):
-                # Sağ Üst Köşe: x=170, y=10, w=30
+                # Sağ Üst Köşe
                 self.image(logo_path, x=170, y=10, w=30)
             self.ln(25)
 
         def footer(self):
             self.set_y(-15)
-            self.set_font("DejaVu", '', 8)
+            self.set_font(font_family, '', 8) # Italik yerine normal (OpenSans Italic yüklemedik)
             self.set_text_color(128)
             self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
 
     pdf = TCMBReport()
     
-    # Türkçe Fontları Kaydet
-    pdf.add_font("DejaVu", "", font_reg, uni=True)
-    pdf.add_font("DejaVu", "B", font_bold, uni=True)
-    
+    # Özel fontları kaydet (Varsa)
+    if use_custom_font:
+        try:
+            pdf.add_font("OpenSans", "", font_reg)
+            pdf.add_font("OpenSans", "B", font_bold)
+        except Exception as e:
+            # Font yüklenirken hata olursa (bozuk dosya vb.), Helvetica'ya dön
+            font_family = "Helvetica"
+            st.error(f"Font yükleme hatası: {e}. Standart font kullanılıyor.")
+
     pdf.add_page()
     pdf.set_text_color(0)
 
     # 1. BAŞLIK
-    pdf.set_font("DejaVu", 'B', 20)
+    pdf.set_font(font_family, 'B', 20)
     pdf.cell(0, 10, report_data['title'], ln=True, align='L')
     
     # 2. BİRİM
-    pdf.set_font("DejaVu", '', 12)
+    pdf.set_font(font_family, '', 12)
     pdf.set_text_color(80)
     pdf.cell(0, 8, report_data['unit'], ln=True, align='L')
     
-    # 3. TARİH (Sağa Yaslı)
+    # 3. TARİH
     pdf.set_text_color(0)
-    pdf.set_font("DejaVu", '', 10)
+    pdf.set_font(font_family, '', 10)
     pdf.cell(0, 8, report_data['date'], ln=True, align='R')
     pdf.ln(5)
 
     # 4. PARAGRAF
     if report_data['body']:
-        pdf.set_font("DejaVu", '', 11)
+        pdf.set_font(font_family, '', 11)
         pdf.multi_cell(0, 6, report_data['body'])
         pdf.ln(10)
 
     # 5. İÇERİK BLOKLARI
     for block in report_data['content_blocks']:
         
-        # Sayfa Sonu Kontrolü
         if pdf.get_y() > 240: pdf.add_page()
 
-        # Blok Başlığı
         if block.get('title'):
-            pdf.set_font("DejaVu", 'B', 12)
-            pdf.set_text_color(200, 0, 0) # Kırmızımsı Başlık
+            pdf.set_font(font_family, 'B', 12)
+            pdf.set_text_color(200, 0, 0)
             pdf.cell(0, 10, block['title'], ln=True, align='L')
             pdf.set_text_color(0)
             pdf.ln(2)
 
-        # GRAFİK
         if block['type'] == 'chart':
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
                 try:
@@ -226,27 +236,19 @@ def create_custom_pdf_report(report_data):
             try: os.remove(tmpfile.name)
             except: pass
 
-        # TABLO
         elif block['type'] == 'table':
             df_table = block['df']
-            
-            # Tablo Fontu
-            pdf.set_font("DejaVu", '', 8)
+            pdf.set_font(font_family, '', 8)
             pdf.set_draw_color(200)
             
             with pdf.table() as table:
-                # Başlık Satırı (Renkli)
                 row = table.row()
                 for col_name in df_table.columns:
-                    # Kırmızı Başlık, Beyaz Yazı
                     row.cell(str(col_name), style=FontFace(emphasis="BOLD", color=255, fill_color=(200, 50, 50)))
-                
-                # Veri Satırları
                 for _, data_row in df_table.iterrows():
                     row = table.row()
                     for item in data_row:
                         row.cell(str(item))
-            
             pdf.ln(10)
 
     return bytes(pdf.output())
@@ -391,9 +393,11 @@ elif page == "Dashboard":
 
         with st.sidebar:
             st.markdown("### 🔍 Dashboard Filtreleri")
+            x_axis_mode = st.radio("Grafik Görünümü (X Ekseni)", ["📅 Hedef Dönem (Vade)", "⏳ Tahmin Tarihi (Revizyon)"])
+            st.markdown("---")
             calc_method = st.radio("Medyan Hesaplama", ["Otomatik", "Manuel"])
             manual_median_val = 0.0 if calc_method == "Otomatik" else st.number_input("Manuel Değer", step=0.01, format="%.2f")
-            
+            st.markdown("---")
             cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
             avail_src = sorted(df_latest[df_latest['kategori'].isin(cat_filter)]['anket_kaynagi'].astype(str).unique())
             src_filter = st.multiselect("Kaynak", avail_src, default=avail_src)
@@ -401,19 +405,21 @@ elif page == "Dashboard":
             usr_filter = st.multiselect("Katılımcı", avail_usr, default=avail_usr)
             yr_filter = st.multiselect("Yıl", sorted(df_latest['yil'].unique()), default=sorted(df_latest['yil'].unique()))
 
-        is_single_user = (len(usr_filter) == 1)
-        
-        if is_single_user:
+        is_revizyon_mode = "Revizyon" in x_axis_mode
+        selected_target_period = None
+        if is_revizyon_mode and len(usr_filter) > 1:
+            st.info("💡 Revizyon modunda birden fazla kişi seçiliyken, tek bir 'Hedef Dönem' seçiniz.")
+            avail_periods = sorted(df_history['donem'].unique(), reverse=True)
+            selected_target_period = st.selectbox("İncelenecek Hedef Dönem", avail_periods)
+
+        if is_revizyon_mode:
             target_df = df_history[df_history['gorunen_isim'].isin(usr_filter) & df_history['yil'].isin(yr_filter)].copy()
-            x_axis_col = "tahmin_tarihi"; x_label = "Tahmin Giriş Tarihi"; sort_col = "tahmin_tarihi"; tick_format = "%d-%m-%Y"
+            if selected_target_period: target_df = target_df[target_df['donem'] == selected_target_period]
+            target_df['tahmin_tarihi_str'] = target_df['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
+            x_col = "tahmin_tarihi_str"; sort_col = "tahmin_tarihi"
         else:
-            target_df = df_latest[
-                df_latest['kategori'].isin(cat_filter) & 
-                df_latest['anket_kaynagi'].isin(src_filter) & 
-                df_latest['gorunen_isim'].isin(usr_filter) & 
-                df_latest['yil'].isin(yr_filter)
-            ].copy()
-            x_axis_col = "donem"; x_label = "Hedef Dönem"; sort_col = "donem_date"; tick_format = None
+            target_df = df_latest[df_latest['kategori'].isin(cat_filter) & df_latest['anket_kaynagi'].isin(src_filter) & df_latest['gorunen_isim'].isin(usr_filter) & df_latest['yil'].isin(yr_filter)].copy()
+            x_col = "donem"; sort_col = "donem_date"
 
         if target_df.empty: st.warning("Veri bulunamadı."); st.stop()
 
@@ -422,14 +428,13 @@ elif page == "Dashboard":
         with tabs[0]:
             def plot(y, min_c, max_c, tit):
                 chart_data = target_df.sort_values(sort_col)
-                fig = px.line(chart_data, x=x_axis_col, y=y, color="gorunen_isim" if not is_single_user else "donem", markers=True, title=tit, hover_data=["hover_text"])
-                if tick_format: fig.update_xaxes(tickformat=tick_format)
+                color_col = "donem" if is_revizyon_mode and len(usr_filter) == 1 else "gorunen_isim"
+                fig = px.line(chart_data, x=x_col, y=y, color=color_col, markers=True, title=tit, hover_data=["hover_text"])
                 dfr = chart_data.dropna(subset=[min_c, max_c])
                 if not dfr.empty:
-                    grp = "donem" if is_single_user else "gorunen_isim"
-                    for g in dfr[grp].unique():
-                        ud = dfr[dfr[grp] == g]
-                        fig.add_trace(go.Scatter(x=ud[x_axis_col], y=ud[y], mode='markers', error_y=dict(type='data', symmetric=False, array=ud[max_c]-ud[y], arrayminus=ud[y]-ud[min_c], color='gray', width=2), showlegend=False, hoverinfo='skip', marker=dict(size=0, opacity=0)))
+                    for g in dfr[color_col].unique():
+                        ud = dfr[dfr[color_col] == g]
+                        fig.add_trace(go.Scatter(x=ud[x_col], y=ud[y], mode='markers', error_y=dict(type='data', symmetric=False, array=ud[max_c]-ud[y], arrayminus=ud[y]-ud[min_c], color='gray', width=2), showlegend=False, hoverinfo='skip', marker=dict(size=0, opacity=0)))
                 st.plotly_chart(fig, use_container_width=True)
             c1, c2 = st.columns(2); 
             with c1: plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar")
@@ -439,29 +444,32 @@ elif page == "Dashboard":
             with c4: plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf")
 
         with tabs[1]:
-            pers = sorted(list(target_df['donem'].unique()), reverse=True)
-            tp = st.selectbox("Dönem Seç", pers, key="dp")
-            dp = target_df[target_df['donem'] == tp].copy()
-            met_map = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
-            sm = st.radio("Metrik", list(met_map.keys()), horizontal=True)
-            mc = met_map[sm]
-            dp = dp.dropna(subset=[mc])
-            if len(dp)>0:
-                mv = manual_median_val if calc_method == "Manuel" else dp[mc].median()
-                dp = dp.sort_values(by=mc)
-                fig = go.Figure()
-                y_val = dp['tahmin_tarihi'].dt.strftime('%d-%m-%Y') if is_single_user else dp['gorunen_isim']
-                fig.add_trace(go.Scatter(x=dp[mc], y=y_val, mode='markers', marker=dict(size=14, color='#1976D2', line=dict(width=1, color='white')), name='Tahmin', text=[f"%{v:.2f}" for v in dp[mc]], hoverinfo='text'))
-                fig.add_vline(x=mv, line_width=3, line_color="red")
-                fig.add_annotation(x=mv, y=-0.1, text=f"MEDYAN %{mv:.2f}", showarrow=False, font=dict(color="red", size=14, weight="bold"), yref="paper")
-                fig.update_layout(title=f"{sm} Dağılım ({tp})", height=max(500, len(dp)*35))
-                st.plotly_chart(fig, use_container_width=True)
-            else: st.info("Veri yok")
+            if is_revizyon_mode and not selected_target_period:
+                 st.info("⚠️ Dağılım analizi için 'Hedef Dönem' seçiniz.")
+            else:
+                current_periods = sorted(list(target_df['donem'].unique()), reverse=True)
+                tp = st.selectbox("Dönem Seç", current_periods, key="dp")
+                dp = target_df[target_df['donem'] == tp].copy()
+                met_map = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
+                sm = st.radio("Metrik", list(met_map.keys()), horizontal=True)
+                mc = met_map[sm]
+                dp = dp.dropna(subset=[mc])
+                if len(dp)>0:
+                    mv = manual_median_val if calc_method == "Manuel" else dp[mc].median()
+                    dp = dp.sort_values(by=mc)
+                    fig = go.Figure()
+                    y_val = dp['tahmin_tarihi'].dt.strftime('%Y-%m-%d') if (is_revizyon_mode and len(usr_filter)==1) else dp['gorunen_isim']
+                    fig.add_trace(go.Scatter(x=dp[mc], y=y_val, mode='markers', marker=dict(size=14, color='#1976D2', line=dict(width=1, color='white')), name='Tahmin', text=[f"%{v:.2f}" for v in dp[mc]], hoverinfo='text'))
+                    fig.add_vline(x=mv, line_width=3, line_color="red")
+                    fig.add_annotation(x=mv, y=-0.1, text=f"MEDYAN %{mv:.2f}", showarrow=False, font=dict(color="red", size=14, weight="bold"), yref="paper")
+                    fig.update_layout(title=f"{sm} Dağılım ({tp})", height=max(500, len(dp)*35))
+                    st.plotly_chart(fig, use_container_width=True)
+                else: st.info("Veri yok")
 
         with tabs[2]:
             mb = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
             sb = st.selectbox("Veri Seti", list(mb.keys()))
-            fig = px.box(target_df.sort_values("donem_date"), x="donem", y=mb[sb], color="donem", title=f"{sb} Dağılımı")
+            fig = px.box(target_df.sort_values(sort_col), x=x_col, y=mb[sb], color="donem", title=f"{sb} Dağılımı")
             st.plotly_chart(fig, use_container_width=True)
 
 # ========================================================
@@ -478,7 +486,6 @@ elif page == "🔥 Isı Haritası":
         df_t = clean_and_sort_data(df_t)
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
-        
         df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         df_full['gorunen_isim'] = df_full.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
 
@@ -503,20 +510,14 @@ elif page == "🔥 Isı Haritası":
             else:
                 target_period = c3.selectbox("Hangi Hedefin Geçmişini İzliceksiniz?", all_periods)
                 time_granularity = c3.radio("Zaman Dilimi", ["🗓️ Aylık (Son Veri)", "📆 Günlük (Detaylı)"])
-                
                 if not sel_users or not target_period: st.stop()
                 df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & (df_full['donem'] == target_period)].copy()
-                
-                if "Günlük" in time_granularity:
-                    df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
-                else:
-                    df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
-                
+                if "Günlük" in time_granularity: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
+                else: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
                 df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'tahmin_zaman'], keep='last')
                 piv_col = 'tahmin_zaman'
 
         if df_f.empty: st.warning("Veri yok."); st.stop()
-
         pivot_df = df_f.pivot(index='gorunen_isim', columns=piv_col, values=sel_metric)
         pivot_df = pivot_df.reindex(columns=sorted(pivot_df.columns))
 
@@ -528,8 +529,7 @@ elif page == "🔥 Isı Haritası":
                     val = row[col]
                     if pd.isna(val): continue
                     st = ''
-                    if not first: 
-                        st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'; first=True
+                    if not first: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'; first=True
                     else:
                         if prev is not None:
                             if val > prev: st='background-color: #FFCDD2; color: #B71C1C; font-weight: bold; border: 1px solid white;'
@@ -545,7 +545,7 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: RAPOR OLUŞTUR (YENİ EKLENEN KISIM)
+# SAYFA: RAPOR OLUŞTUR (GELİŞMİŞ)
 # ========================================================
 elif page == "📄 Rapor Oluştur":
     st.header("📄 Profesyonel Rapor Oluşturucu")
@@ -561,7 +561,6 @@ elif page == "📄 Rapor Oluştur":
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # En güncel verileri baz alalım
         df_latest = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df = pd.merge(df_latest, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         
@@ -581,7 +580,6 @@ elif page == "📄 Rapor Oluştur":
 
             st.markdown("---")
             st.subheader("2. İçerik Seçimi")
-            # SEÇİMLER
             inc_ppk_chart = st.checkbox("Grafik: PPK Beklentileri", value=True)
             inc_enf_chart = st.checkbox("Grafik: Enflasyon Beklentileri", value=True)
             inc_box_chart = st.checkbox("Grafik: Dağılım (Box Plot)", value=False)
@@ -590,14 +588,12 @@ elif page == "📄 Rapor Oluştur":
 
             st.markdown("---")
             st.subheader("3. Veri Filtreleri")
-            # FİLTRELER: Kategori, Kaynak, DÖNEM (YENİ)
             cat_f = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Kurumsal"])
             src_f = st.multiselect("Kaynak", sorted(df['anket_kaynagi'].unique()), default=sorted(df['anket_kaynagi'].unique()))
-            # DÖNEM FİLTRESİ EKLENDİ
+            # DÖNEM FİLTRESİ
             all_periods_rep = sorted(df['donem'].unique(), reverse=True)
             per_f = st.multiselect("Dönem (Period)", all_periods_rep, default=all_periods_rep[:6] if len(all_periods_rep)>0 else [])
 
-        # FİLTRE UYGULA
         df_rep = df[df['kategori'].isin(cat_f) & df['anket_kaynagi'].isin(src_f) & df['donem'].isin(per_f)]
 
         report_blocks = []
@@ -622,7 +618,6 @@ elif page == "📄 Rapor Oluştur":
                     st.plotly_chart(fig3, use_container_width=True)
                     report_blocks.append({'type': 'chart', 'title': 'Enflasyon Beklenti Dağılımı', 'fig': fig3})
 
-                # TABLO 1: ÖZET
                 if inc_summary:
                     agg_df = df_rep.groupby('donem').agg(
                         Min_PPK=('tahmin_ppk_faiz', 'min'),
@@ -631,31 +626,20 @@ elif page == "📄 Rapor Oluştur":
                         Med_Enf=('tahmin_yilsonu_enf', 'median'),
                         Katilimci=('kullanici_adi', 'count')
                     ).reset_index().sort_values('donem', ascending=False)
-                    for c in ['Min_PPK', 'Max_PPK', 'Med_PPK', 'Med_Enf']:
-                        agg_df[c] = agg_df[c].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "-")
-                    
-                    st.write("Özet Tablo:")
-                    st.dataframe(agg_df, use_container_width=True)
+                    for c in ['Min_PPK', 'Max_PPK', 'Med_PPK', 'Med_Enf']: agg_df[c] = agg_df[c].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "-")
+                    st.write("Özet Tablo:"); st.dataframe(agg_df, use_container_width=True)
                     report_blocks.append({'type': 'table', 'title': 'Dönemsel Özet İstatistikler', 'df': agg_df})
 
-                # TABLO 2: DETAY (Seçildiyse)
                 if inc_detail:
                     detail_df = df_rep[['donem', 'gorunen_isim', 'tahmin_ppk_faiz', 'tahmin_yilsonu_enf']].sort_values(['donem', 'gorunen_isim'], ascending=[False, True])
                     detail_df.columns = ['Dönem', 'Kurum', 'PPK', 'Enflasyon (YS)']
-                    st.write("Detaylı Veri:")
-                    st.dataframe(detail_df, use_container_width=True)
+                    st.write("Detaylı Veri:"); st.dataframe(detail_df, use_container_width=True)
                     report_blocks.append({'type': 'table', 'title': 'Katılımcı Bazlı Detaylar', 'df': detail_df})
 
         st.markdown("---")
         if st.button("📄 PDF İndir", type="primary"):
             if not df_rep.empty and report_blocks:
-                r_data = {
-                    'title': rep_title,
-                    'unit': rep_unit,
-                    'date': rep_date.strftime('%d.%m.%Y'),
-                    'body': rep_body,
-                    'content_blocks': report_blocks
-                }
+                r_data = {'title': rep_title, 'unit': rep_unit, 'date': rep_date.strftime('%d.%m.%Y'), 'body': rep_body, 'content_blocks': report_blocks}
                 with st.spinner("PDF hazırlanıyor..."):
                     pdf_bytes = create_custom_pdf_report(r_data)
                 st.download_button(label="⬇️ İndir", data=pdf_bytes, file_name="Rapor.pdf", mime="application/pdf")
