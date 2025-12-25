@@ -13,7 +13,7 @@ import time
 import requests
 import xlsxwriter
 
-# --- WORD KÜTÜPHANESİ ---
+# --- WORD KÜTÜPHANESİ KONTROLÜ ---
 try:
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
@@ -23,9 +23,23 @@ except ImportError:
     st.stop()
 
 # --- 1. AYARLAR VE TASARIM ---
-st.set_page_config(page_title="Finansal Tahmin Terminali", layout="wide", page_icon="📊", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="Finansal Tahmin Terminali", 
+    layout="wide",
+    page_icon="📊",
+    initial_sidebar_state="expanded"
+)
 
-st.markdown("""<style>.stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); } .stButton button { width: 100%; border-radius: 8px; font-weight: 600; } div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; } h1, h2, h3 { color: #2c3e50; } div[data-testid="stDataFrame"] { width: 100%; }</style>""", unsafe_allow_html=True)
+# Modern CSS
+st.markdown("""
+<style>
+    .stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
+    div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
+    h1, h2, h3 { color: #2c3e50; }
+    div[data-testid="stDataFrame"] { width: 100%; }
+</style>
+""", unsafe_allow_html=True)
 
 # --- BAĞLANTI ---
 try:
@@ -52,22 +66,35 @@ def get_period_list():
 
 tum_donemler = get_period_list()
 
-def normalize_name(name): return name.strip().title() if name else ""
+def normalize_name(name):
+    return name.strip().title() if name else ""
 
 def safe_int(val):
-    try: return int(float(val)) if pd.notnull(val) else 0
+    try:
+        if pd.isna(val) or val is None: return 0
+        return int(float(val))
     except: return 0
 
 def clean_and_sort_data(df):
     if df.empty: return df
-    numeric_cols = ["tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "tahmin_yillik_enf", "min_yillik_enf", "max_yillik_enf", "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "katilimci_sayisi"]
+    numeric_cols = [
+        "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
+        "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz",
+        "tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf",
+        "tahmin_yillik_enf", "min_yillik_enf", "max_yillik_enf",
+        "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf",
+        "katilimci_sayisi"
+    ]
     for col in numeric_cols:
         if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
+    
     if "donem" in df.columns:
         df["donem_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="donem_date")
+    
     if "tahmin_tarihi" in df.columns:
         df["tahmin_tarihi"] = pd.to_datetime(df["tahmin_tarihi"])
+        
     return df
 
 def parse_range_input(text_input, default_median=0.0):
@@ -101,7 +128,7 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- DÜZELTİLMİŞ EXCEL GRAFİK MOTORU (Hata Çözümü) ---
+# --- EXCEL DASHBOARD & ISI HARİTASI MOTORU ---
 def create_excel_dashboard(df_source):
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
@@ -115,20 +142,17 @@ def create_excel_dashboard(df_source):
     ws_raw = workbook.add_worksheet("Ham Veri")
     ws_raw.write_row('A1', df_source.columns, bold)
     
-    # Verileri yazarken NaN/None kontrolü (HATA BURADAYDI)
     for r, row in enumerate(df_source.values):
         for c, val in enumerate(row):
-            # Eğer değer boşsa (NaN, None, NaT), boş string yaz ve geç
             if pd.isna(val):
                 ws_raw.write_string(r+1, c, "")
                 continue
-                
             if isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)):
                 ws_raw.write_datetime(r+1, c, val, date_fmt)
             else:
                 ws_raw.write(r+1, c, val)
 
-    # Grafik oluşturucu
+    # 2. GRAFİK OLUŞTURUCU
     def create_sheet_with_chart(metric_col, sheet_name, chart_title):
         df_sorted = df_source.sort_values("donem_date")
         try:
@@ -140,14 +164,11 @@ def create_excel_dashboard(df_source):
         ws.write_row('B1', pivot.columns, bold)
         ws.write_column('A2', pivot.index)
         
-        # Pivot verisini yazarken de NaN kontrolü yapalım
         for i, col_name in enumerate(pivot.columns):
             col_data = pivot[col_name]
             for r_idx, val in enumerate(col_data):
-                if pd.isna(val):
-                    ws.write_string(r_idx+1, i+1, "")
-                else:
-                    ws.write_number(r_idx+1, i+1, val, num_fmt)
+                if pd.isna(val): ws.write_string(r_idx+1, i+1, "")
+                else: ws.write_number(r_idx+1, i+1, val, num_fmt)
             
         chart = workbook.add_chart({'type': 'line'})
         num_rows = len(pivot)
@@ -168,9 +189,54 @@ def create_excel_dashboard(df_source):
         chart.set_size({'width': 800, 'height': 450})
         ws.insert_chart('E2', chart)
 
-    create_sheet_with_chart('tahmin_ppk_faiz', 'PPK Analiz', 'PPK Faiz Beklentileri')
-    create_sheet_with_chart('tahmin_yilsonu_enf', 'Enflasyon Analiz', 'Yıl Sonu Enflasyon Beklentileri')
-    create_sheet_with_chart('tahmin_yilsonu_faiz', 'YS Faiz Analiz', 'Yıl Sonu Faiz Beklentileri')
+    # 3. EXCEL ISI HARİTASI (CONDITIONAL FORMATTING)
+    def create_heatmap_sheet(metric_col, sheet_name):
+        # Pivot: Satırlar=Katılımcı, Sütunlar=Dönem
+        try:
+            # Sıralama: En son dönem en sağda olsun
+            df_s = df_source.sort_values("donem_date")
+            pivot = df_s.pivot(index='gorunen_isim', columns='donem', values=metric_col)
+        except: return
+
+        ws = workbook.add_worksheet(sheet_name)
+        
+        # Başlıklar
+        ws.write('A1', 'Katılımcı / Dönem', bold)
+        ws.write_row('B1', pivot.columns, bold)
+        ws.write_column('A2', pivot.index, bold)
+        
+        # Verileri Yaz
+        for i, col_name in enumerate(pivot.columns):
+            col_data = pivot[col_name]
+            for r_idx, val in enumerate(col_data):
+                if pd.isna(val): ws.write_string(r_idx+1, i+1, "")
+                else: ws.write_number(r_idx+1, i+1, val, num_fmt)
+        
+        # Koşullu Biçimlendirme (3 Renk Skalası: Yeşil-Sarı-Kırmızı)
+        # Genellikle Enflasyon/Faiz için Düşük=İyi(Yeşil), Yüksek=Kötü(Kırmızı)
+        # Eğer tersi istenirse renk kodları değiştirilebilir.
+        last_row = len(pivot)
+        last_col = len(pivot.columns)
+        
+        ws.conditional_format(1, 1, last_row, last_col, {
+            'type': '3_color_scale',
+            'min_color': '#63BE7B', # Yeşil (Düşük)
+            'mid_color': '#FFEB84', # Sarı (Orta)
+            'max_color': '#F8696B'  # Kırmızı (Yüksek)
+        })
+        
+        # Sütun genişliklerini ayarla
+        ws.set_column(0, 0, 25) # İsim sütunu geniş
+        ws.set_column(1, last_col, 10) # Veri sütunları
+
+    # ÇİZGİ GRAFİK SAYFALARI
+    create_sheet_with_chart('tahmin_ppk_faiz', '📈 PPK Grafiği', 'PPK Faiz Beklentileri')
+    create_sheet_with_chart('tahmin_yilsonu_enf', '📈 Enflasyon Grafiği', 'Yıl Sonu Enflasyon Beklentileri')
+    
+    # ISI HARİTASI SAYFALARI (YENİ)
+    create_heatmap_sheet('tahmin_ppk_faiz', '🔥 Isı Haritası - PPK')
+    create_heatmap_sheet('tahmin_yilsonu_enf', '🔥 Isı Haritası - Enf')
+    create_heatmap_sheet('tahmin_yilsonu_faiz', '🔥 Isı Haritası - YS Faiz')
 
     workbook.close()
     return output.getvalue()
@@ -334,7 +400,9 @@ def get_participant_selection():
     row = df[df["ad_soyad"] == name_map[sel]].iloc[0]
     return name_map[sel], row['kategori'], sel
 
-# ... (GELİŞMİŞ VERİ HAVUZU - AYNI KOD) ...
+# ========================================================
+# SAYFA: GELİŞMİŞ VERİ HAVUZU
+# ========================================================
 if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
@@ -413,7 +481,6 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 if c2.button("✏️", key=f"e{row['id']}"): st.session_state['edit_target'] = row; st.rerun()
                                 if c3.button("🗑️", key=f"d{row['id']}"): supabase.table(TABLE_TAHMIN).delete().eq("id", int(row['id'])).execute(); st.rerun()
 
-# ... (DİĞER SAYFALAR AYNI) ...
 # ========================================================
 # SAYFA: DASHBOARD
 # ========================================================
@@ -756,30 +823,3 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
-
-# ========================================================
-# SAYFA: KATILIMCI YÖNETİMİ
-# ========================================================
-elif page == "Katılımcı Yönetimi":
-    st.header("👥 Katılımcı Yönetimi")
-    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
-        with st.form("new_kat"):
-            c1, c2 = st.columns(2)
-            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
-            src = st.text_input("Kaynak (Opsiyonel)")
-            if st.form_submit_button("Ekle"):
-                if ad:
-                    try: 
-                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
-                        st.toast("Eklendi")
-                    except: st.error("Hata")
-    
-    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
-    df = pd.DataFrame(res.data)
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
-        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
-            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
-            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
-            st.rerun()
