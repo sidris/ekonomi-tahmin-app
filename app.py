@@ -12,6 +12,17 @@ import datetime
 import time
 import requests
 
+# --- WORD İÇİN GEREKLİ KÜTÜPHANELER ---
+# Eğer hata alırsanız: pip install python-docx
+try:
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+except ImportError:
+    st.error("Lütfen 'python-docx' kütüphanesini yükleyin: pip install python-docx")
+    st.stop()
+
 # --- 1. AYARLAR VE TASARIM ---
 st.set_page_config(
     page_title="Finansal Tahmin Terminali", 
@@ -118,176 +129,160 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- GELİŞMİŞ PDF MOTORU (HATA KORUMALI) ---
-def check_and_download_font():
-    """DejaVu Sans fontunu indirir. Başarısız olursa None döner."""
-    font_path = "DejaVuSans.ttf"
-    font_bold_path = "DejaVuSans-Bold.ttf"
+# --- YENİ: WORD RAPOR OLUŞTURUCU (DOCX) ---
+def create_word_report(report_data):
+    """
+    Word (DOCX) raporu oluşturur. Google Docs ile tam uyumludur.
+    """
+    doc = Document()
     
-    # URL'ler (Güvenilir kaynak)
-    urls = {
-        font_path: "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Regular.ttf",
-        font_bold_path: "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Bold.ttf"
-    }
-
+    # 1. LOGO (Geçici indirip ekle)
+    # Wikimedia PNG linki (SVG değil)
+    logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
     try:
-        for path, url in urls.items():
-            if not os.path.exists(path) or os.path.getsize(path) < 1000:
-                r = requests.get(url, timeout=10)
-                if r.status_code == 200:
-                    with open(path, 'wb') as f: f.write(r.content)
-        
-        # Kontrol et
-        if os.path.exists(font_path) and os.path.exists(font_bold_path):
-            return font_path, font_bold_path
-    except:
-        pass
+        r = requests.get(logo_url, timeout=5)
+        if r.status_code == 200:
+            with io.BytesIO(r.content) as image_stream:
+                # Logoyu sağa hizalamak için tablo hilesi veya paragraf hizalama kullanılabilir
+                # Basitçe sağa yaslı bir paragraf
+                logo_par = doc.add_paragraph()
+                logo_par.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                run = logo_par.add_run()
+                run.add_picture(image_stream, width=Inches(1.2))
+    except Exception as e:
+        doc.add_paragraph("[Logo Yüklenemedi]", style='Body Text')
+
+    # 2. BAŞLIK
+    title = doc.add_heading(report_data['title'], 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    return None, None
+    # Birim ve Tarih
+    p_info = doc.add_paragraph()
+    p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_unit = p_info.add_run(report_data['unit'] + "\n")
+    run_unit.bold = True
+    run_unit.font.size = Pt(12)
+    run_date = p_info.add_run(report_data['date'])
+    run_date.italic = True
 
-def safe_str(text, use_fallback=False):
-    """
-    Eğer Türkçe font yüklenemediyse (use_fallback=True), 
-    Türkçe karakterleri İngilizce karşılıklarına çevirir.
-    Böylece 'FPDFUnicodeEncodingException' hatası engellenir.
-    """
-    if not isinstance(text, str):
-        return str(text)
-        
-    if use_fallback:
-        replacements = {
-            'ğ': 'g', 'Ğ': 'G', 'ş': 's', 'Ş': 'S', 'ı': 'i', 'İ': 'I',
-            'ö': 'o', 'Ö': 'O', 'ü': 'u', 'Ü': 'U', 'ç': 'c', 'Ç': 'C',
-            'â': 'a', 'î': 'i'
-        }
-        for k, v in replacements.items():
-            text = text.replace(k, v)
-    return text
+    doc.add_paragraph("") # Boşluk
 
-def create_custom_pdf_report(report_data):
-    font_reg, font_bold = check_and_download_font()
-    
-    # Font yüklendi mi kontrolü
-    use_custom_font = (font_reg is not None and font_bold is not None)
-    
-    # Yüklenemezse Helvetica kullan (Ama safe_str ile temizle)
-    main_font = "DejaVu" if use_custom_font else "Helvetica"
-    fallback_mode = not use_custom_font # Eğer custom font yoksa fallback modu aktiftir
-
-    class TCMBReport(FPDF):
-        def header(self):
-            # Logo (PNG)
-            # Not: FPDF SVG desteklemez, bu yüzden PNG linki kullanıyoruz.
-            logo_url = "https://upload.wikimedia.org/wikipedia/tr/a/a2/T%C3%BCrkiye_Cumhuriyet_Merkez_Bankas%C4%B1_logosu.png"
-            logo_path = "tcmb_logo.png"
-            
-            if not os.path.exists(logo_path):
-                try:
-                    # User-Agent ekleyerek indirme şansını artır
-                    headers = {'User-Agent': 'Mozilla/5.0'}
-                    r = requests.get(logo_url, headers=headers, verify=False, timeout=5)
-                    if r.status_code == 200:
-                        with open(logo_path, 'wb') as f: f.write(r.content)
-                except: pass
-                
-            if os.path.exists(logo_path):
-                # x=170 (Sağ), y=10 (Üst), w=30 (Genişlik)
-                try:
-                    self.image(logo_path, x=170, y=10, w=30)
-                except: pass # Resim bozuksa hata verme
-            self.ln(25)
-
-        def footer(self):
-            self.set_y(-15)
-            self.set_font(main_font, 'I' if use_custom_font else '', 8)
-            self.set_text_color(128)
-            self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
-
-    pdf = TCMBReport()
-    
-    # Font Ekleme
-    if use_custom_font:
-        try:
-            pdf.add_font("DejaVu", "", font_reg)
-            pdf.add_font("DejaVu", "B", font_bold)
-            pdf.add_font("DejaVu", "I", font_reg) # Italik dosyası yoksa regular kullan
-        except:
-            # Font dosyası bozuksa Helvetica'ya dön
-            main_font = "Helvetica"
-            fallback_mode = True
-
-    pdf.add_page()
-    pdf.set_text_color(0)
-
-    # --- İÇERİK OLUŞTURMA (safe_str KULLANARAK) ---
-
-    # 1. BAŞLIK
-    pdf.set_font(main_font, 'B', 20)
-    pdf.cell(0, 10, safe_str(report_data['title'], fallback_mode), ln=True, align='L')
-    
-    # 2. BİRİM
-    pdf.set_font(main_font, '', 12)
-    pdf.set_text_color(80)
-    pdf.cell(0, 8, safe_str(report_data['unit'], fallback_mode), ln=True, align='L')
-    
-    # 3. TARİH
-    pdf.set_text_color(0)
-    pdf.set_font(main_font, '', 10)
-    pdf.cell(0, 8, safe_str(report_data['date'], fallback_mode), ln=True, align='R')
-    pdf.ln(5)
-
-    # 4. PARAGRAF
+    # 3. METİN
     if report_data['body']:
-        pdf.set_font(main_font, '', 11)
-        pdf.multi_cell(0, 6, safe_str(report_data['body'], fallback_mode))
-        pdf.ln(10)
+        p_body = doc.add_paragraph(report_data['body'])
+        p_body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
-    # 5. BLOKLAR
+    # 4. İÇERİK BLOKLARI
     for block in report_data['content_blocks']:
-        if pdf.get_y() > 240: pdf.add_page()
-
-        # Blok Başlığı
+        doc.add_paragraph("") # Ayraç
+        
+        # Başlık
         if block.get('title'):
-            pdf.set_font(main_font, 'B', 12)
-            pdf.set_text_color(200, 0, 0)
-            pdf.cell(0, 10, safe_str(block['title'], fallback_mode), ln=True, align='L')
-            pdf.set_text_color(0)
-            pdf.ln(2)
+            h = doc.add_heading(block['title'], level=2)
+            run = h.runs[0]
+            run.font.color.rgb = RGBColor(180, 0, 0) # Kırmızımsı Başlık
 
         # GRAFİK
         if block['type'] == 'chart':
+            # Plotly figürünü resme çevir
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
                 try:
                     block['fig'].write_image(tmpfile.name, width=1000, height=500, scale=2)
-                    pdf.image(tmpfile.name, x=15, w=180)
-                    pdf.ln(5)
+                    doc.add_picture(tmpfile.name, width=Inches(6.5))
                 except:
-                    pdf.set_font(main_font, '', 10)
-                    pdf.cell(0, 10, "[Grafik Olusturulamadi]", ln=True)
+                    doc.add_paragraph("[Grafik İşlenemedi]")
             try: os.remove(tmpfile.name)
             except: pass
 
         # TABLO
         elif block['type'] == 'table':
             df_table = block['df']
-            pdf.set_font(main_font, '', 8)
-            pdf.set_draw_color(200)
+            # Word Tablosu Oluştur
+            table = doc.add_table(rows=1, cols=len(df_table.columns))
+            table.style = 'Light Shading Accent 1' # Word'ün hazır stili (Renkli)
             
-            with pdf.table() as table:
-                # Başlık
-                row = table.row()
-                for col_name in df_table.columns:
-                    safe_col = safe_str(str(col_name), fallback_mode)
-                    row.cell(safe_col, style=FontFace(emphasis="BOLD", color=255, fill_color=(200, 50, 50)))
-                
-                # Veri
-                for _, data_row in df_table.iterrows():
-                    row = table.row()
-                    for item in data_row:
-                        safe_val = safe_str(str(item), fallback_mode)
-                        row.cell(safe_val)
-            pdf.ln(10)
+            # Başlıklar
+            hdr_cells = table.rows[0].cells
+            for i, col_name in enumerate(df_table.columns):
+                hdr_cells[i].text = str(col_name)
+            
+            # Veriler
+            for _, row in df_table.iterrows():
+                row_cells = table.add_row().cells
+                for i, item in enumerate(row):
+                    row_cells[i].text = str(item)
 
+    # Dosyayı kaydet
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+# --- GELİŞMİŞ PDF MOTORU (Fallback fontlu) ---
+def create_custom_pdf_report(report_data):
+    # Standart Helvetica kullanarak hata riskini sıfıra indiriyoruz.
+    # Türkçe karakterleri temizliyoruz.
+    class TCMBReport(FPDF):
+        def header(self):
+            # Logo PNG
+            logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
+            logo_path = "temp_logo_pdf.png"
+            if not os.path.exists(logo_path):
+                try:
+                    headers = {'User-Agent': 'Mozilla/5.0'}
+                    r = requests.get(logo_url, headers=headers, timeout=5)
+                    if r.status_code == 200:
+                        with open(logo_path, 'wb') as f: f.write(r.content)
+                except: pass
+            if os.path.exists(logo_path):
+                self.image(logo_path, x=170, y=10, w=30)
+            self.ln(25)
+        def footer(self):
+            self.set_y(-15); self.set_font('Helvetica', 'I', 8)
+            self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
+
+    def clean(text):
+        if not isinstance(text, str): return str(text)
+        tr_map = {'ğ':'g','Ğ':'G','ş':'s','Ş':'S','ı':'i','İ':'I','ö':'o','Ö':'O','ü':'u','Ü':'U','ç':'c','Ç':'C'}
+        for k,v in tr_map.items(): text = text.replace(k,v)
+        return text
+
+    pdf = TCMBReport()
+    pdf.add_page()
+    pdf.set_font("Helvetica", 'B', 20)
+    pdf.cell(0, 10, clean(report_data['title']), ln=True)
+    pdf.set_font("Helvetica", '', 12)
+    pdf.cell(0, 8, clean(report_data['unit']), ln=True)
+    pdf.set_font("Helvetica", 'I', 10)
+    pdf.cell(0, 8, report_data['date'], ln=True, align='R')
+    pdf.ln(5)
+    
+    if report_data['body']:
+        pdf.set_font("Helvetica", '', 11)
+        pdf.multi_cell(0, 6, clean(report_data['body']))
+        pdf.ln(10)
+
+    for block in report_data['content_blocks']:
+        if pdf.get_y() > 240: pdf.add_page()
+        if block.get('title'):
+            pdf.set_font("Helvetica", 'B', 12)
+            pdf.cell(0, 10, clean(block['title']), ln=True)
+        if block['type'] == 'chart':
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                try: block['fig'].write_image(tmp.name, width=1000, height=500, scale=2); pdf.image(tmp.name, x=15, w=180)
+                except: pdf.cell(0,10,"[Grafik Hatasi]",ln=True)
+            try: os.remove(tmp.name)
+            except: pass
+        elif block['type'] == 'table':
+            df = block['df']
+            pdf.set_font("Helvetica", '', 8)
+            with pdf.table() as t:
+                r = t.row()
+                for c in df.columns: r.cell(clean(str(c)), style=FontFace(emphasis="BOLD", fill_color=(220,220,220)))
+                for _, dr in df.iterrows():
+                    r = t.row()
+                    for item in dr: r.cell(clean(str(item)))
+            pdf.ln(10)
+            
     return bytes(pdf.output())
 
 # --- AUTH ---
@@ -316,7 +311,7 @@ def get_participant_selection():
     return name_map[sel], row['kategori'], sel
 
 # ========================================================
-# SAYFA: GELİŞMİŞ VERİ HAVUZU (YÖNETİM & EXCEL)
+# SAYFA: GELİŞMİŞ VERİ HAVUZU
 # ========================================================
 if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
@@ -502,11 +497,11 @@ elif page == "Dashboard":
         with tabs[2]:
             mb = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
             sb = st.selectbox("Veri Seti", list(mb.keys()))
-            fig = px.box(target_df.sort_values("donem_date"), x="donem", y=mb[sb], color="donem", title=f"{sb} Dağılımı")
+            fig = px.box(target_df.sort_values(sort_col), x=x_col, y=mb[sb], color="donem", title=f"{sb} Dağılımı")
             st.plotly_chart(fig, use_container_width=True)
 
 # ========================================================
-# SAYFA: ISI HARİTASI (GELİŞMİŞ)
+# SAYFA: ISI HARİTASI
 # ========================================================
 elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
@@ -519,7 +514,6 @@ elif page == "🔥 Isı Haritası":
         df_t = clean_and_sort_data(df_t)
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
-        
         df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         df_full['gorunen_isim'] = df_full.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
 
@@ -544,20 +538,14 @@ elif page == "🔥 Isı Haritası":
             else:
                 target_period = c3.selectbox("Hangi Hedefin Geçmişini İzliceksiniz?", all_periods)
                 time_granularity = c3.radio("Zaman Dilimi", ["🗓️ Aylık (Son Veri)", "📆 Günlük (Detaylı)"])
-                
                 if not sel_users or not target_period: st.stop()
                 df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & (df_full['donem'] == target_period)].copy()
-                
-                if "Günlük" in time_granularity:
-                    df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
-                else:
-                    df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
-                
+                if "Günlük" in time_granularity: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
+                else: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
                 df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'tahmin_zaman'], keep='last')
                 piv_col = 'tahmin_zaman'
 
         if df_f.empty: st.warning("Veri yok."); st.stop()
-
         pivot_df = df_f.pivot(index='gorunen_isim', columns=piv_col, values=sel_metric)
         pivot_df = pivot_df.reindex(columns=sorted(pivot_df.columns))
 
@@ -569,8 +557,7 @@ elif page == "🔥 Isı Haritası":
                     val = row[col]
                     if pd.isna(val): continue
                     st = ''
-                    if not first: 
-                        st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'; first=True
+                    if not first: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'; first=True
                     else:
                         if prev is not None:
                             if val > prev: st='background-color: #FFCDD2; color: #B71C1C; font-weight: bold; border: 1px solid white;'
@@ -586,10 +573,12 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: RAPOR OLUŞTUR (GELİŞMİŞ)
+# SAYFA: RAPOR OLUŞTUR (GELİŞMİŞ WORD)
 # ========================================================
 elif page == "📄 Rapor Oluştur":
     st.header("📄 Profesyonel Rapor Oluşturucu")
+    st.info("Bu ekran, seçtiğiniz veri setine göre Word (veya PDF) rapor üretir.")
+
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
@@ -599,8 +588,10 @@ elif page == "📄 Rapor Oluştur":
         df_t = clean_and_sort_data(df_t)
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
+        
         df_latest = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df = pd.merge(df_latest, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+        
         df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
         df['kategori'] = df['kategori'].fillna('Bireysel')
         df['anket_kaynagi'] = df['anket_kaynagi'].fillna('-')
@@ -665,13 +656,28 @@ elif page == "📄 Rapor Oluştur":
                     report_blocks.append({'type': 'table', 'title': 'Katılımcı Bazlı Detaylar', 'df': detail_df})
 
         st.markdown("---")
-        if st.button("📄 PDF İndir", type="primary"):
+        
+        # BUTONLAR
+        col_btn1, col_btn2 = st.columns(2)
+        
+        # PDF BUTONU
+        if col_btn1.button("📄 PDF Olarak İndir"):
             if not df_rep.empty and report_blocks:
                 r_data = {'title': rep_title, 'unit': rep_unit, 'date': rep_date.strftime('%d.%m.%Y'), 'body': rep_body, 'content_blocks': report_blocks}
                 with st.spinner("PDF hazırlanıyor..."):
                     pdf_bytes = create_custom_pdf_report(r_data)
-                st.download_button(label="⬇️ İndir", data=pdf_bytes, file_name="Rapor.pdf", mime="application/pdf")
+                st.download_button(label="⬇️ Dosyayı Kaydet (PDF)", data=pdf_bytes, file_name="Rapor.pdf", mime="application/pdf")
             else: st.error("İçerik yok.")
+            
+        # WORD BUTONU (YENİ)
+        if col_btn2.button("📝 Word (Google Docs) Olarak İndir"):
+            if not df_rep.empty and report_blocks:
+                r_data = {'title': rep_title, 'unit': rep_unit, 'date': rep_date.strftime('%d.%m.%Y'), 'body': rep_body, 'content_blocks': report_blocks}
+                with st.spinner("Word dosyası hazırlanıyor..."):
+                    word_bytes = create_word_report(r_data)
+                st.download_button(label="⬇️ Dosyayı Kaydet (DOCX)", data=word_bytes, file_name="Rapor.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            else: st.error("İçerik yok.")
+            
     else: st.info("Veri yok.")
 
 # ========================================================
