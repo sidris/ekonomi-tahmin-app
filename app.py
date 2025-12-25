@@ -175,7 +175,8 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
             df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
             df_full['kategori'] = df_full['kategori_y'].fillna('Bireysel')
             df_full['anket_kaynagi'] = df_full['anket_kaynagi'].fillna('-')
-            
+            df_full['tahmin_tarihi'] = pd.to_datetime(df_full['tahmin_tarihi'])
+
             with st.container():
                 c1, c2, c3, c4 = st.columns(4)
                 sel_cat = c1.selectbox("Kategori", ["Tümü"] + list(df_full['kategori'].unique()))
@@ -190,10 +191,26 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
             
             if not admin_mode:
                 st.markdown("---")
-                cols = ["tahmin_tarihi", "donem", "kullanici_adi", "kategori", "anket_kaynagi", "kaynak_link", "katilimci_sayisi", "tahmin_ppk_faiz", "tahmin_yilsonu_faiz", "tahmin_aylik_enf", "tahmin_yilsonu_enf"]
-                final_cols = [c for c in cols if c in df_f.columns]
-                col_cfg = {"kaynak_link": st.column_config.LinkColumn("Link", display_text="🔗"), "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"), **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c}}
+                # TÜM SÜTUNLARI İÇEREN LİSTE
+                full_cols = [
+                    "tahmin_tarihi", "donem", "kullanici_adi", "kategori", "anket_kaynagi", "kaynak_link", "katilimci_sayisi",
+                    "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
+                    "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz",
+                    "tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf",
+                    "tahmin_yillik_enf", "min_yillik_enf", "max_yillik_enf",
+                    "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf"
+                ]
+                final_cols = [c for c in full_cols if c in df_f.columns]
+                
+                col_cfg = {
+                    "kaynak_link": st.column_config.LinkColumn("Link", display_text="🔗"), 
+                    "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"), 
+                    # Sayısal sütunlara format uygula
+                    **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c or "min" in c or "max" in c}
+                }
+                
                 st.dataframe(df_f[final_cols].sort_values(by="tahmin_tarihi", ascending=False), column_config=col_cfg, use_container_width=True, height=600)
+                
                 if not df_f.empty:
                     df_ex = df_f.copy(); df_ex['tahmin_tarihi'] = df_ex['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
                     st.download_button("📥 Excel İndir", to_excel(df_ex), f"Veri_{sel_user}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
@@ -284,6 +301,7 @@ elif page == "Dashboard":
             usr_filter = st.multiselect("Katılımcı", avail_usr, default=avail_usr)
             yr_filter = st.multiselect("Yıl", sorted(df_latest['yil'].unique()), default=sorted(df_latest['yil'].unique()))
 
+        # MANTIK: Tek kullanıcı seçildiyse Revizyon Tarihçesi (X=Tarih), Çokluysa Dönem (X=Dönem)
         is_single_user = (len(usr_filter) == 1)
         
         if is_single_user:
@@ -431,7 +449,7 @@ elif page == "🔥 Isı Haritası":
                                 # DÜŞÜŞ = YEŞİL
                                 st='background-color: #C8E6C9; color: #1B5E20; font-weight: bold; border: 1px solid white;'
                             else: 
-                                # DEĞİŞİM YOK = SARI DEVAM (İsteğe göre ayarlandı)
+                                # DEĞİŞİM YOK = SARI DEVAM
                                 st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'
                     styles.at[idx, col] = st
                     prev = val
@@ -497,3 +515,30 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
+
+# ========================================================
+# SAYFA: KATILIMCI YÖNETİMİ
+# ========================================================
+elif page == "Katılımcı Yönetimi":
+    st.header("👥 Katılımcı Yönetimi")
+    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
+        with st.form("new_kat"):
+            c1, c2 = st.columns(2)
+            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
+            src = st.text_input("Kaynak (Opsiyonel)")
+            if st.form_submit_button("Ekle"):
+                if ad:
+                    try: 
+                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
+                        st.toast("Eklendi")
+                    except: st.error("Hata")
+    
+    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    df = pd.DataFrame(res.data)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
+        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
+            st.rerun()
