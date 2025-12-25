@@ -238,7 +238,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 if c3.button("🗑️", key=f"d{row['id']}"): supabase.table(TABLE_TAHMIN).delete().eq("id", int(row['id'])).execute(); st.rerun()
 
 # ========================================================
-# SAYFA: ISI HARİTASI (DÜZELTİLDİ)
+# SAYFA: ISI HARİTASI (HATA DÜZELTİLDİ)
 # ========================================================
 elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
@@ -438,3 +438,30 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
+
+# ========================================================
+# SAYFA: KATILIMCI YÖNETİMİ
+# ========================================================
+elif page == "Katılımcı Yönetimi":
+    st.header("👥 Katılımcı Yönetimi")
+    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
+        with st.form("new_kat"):
+            c1, c2 = st.columns(2)
+            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
+            src = st.text_input("Kaynak (Opsiyonel)")
+            if st.form_submit_button("Ekle"):
+                if ad:
+                    try: 
+                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
+                        st.toast("Eklendi")
+                    except: st.error("Hata")
+    
+    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    df = pd.DataFrame(res.data)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
+        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
+            st.rerun()
