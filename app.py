@@ -148,7 +148,7 @@ if not st.session_state['giris_yapildi']:
 # --- SIDEBAR & PAGE SELECTION ---
 with st.sidebar:
     st.title("📊 Menü")
-    # BU SATIR KRİTİKTİR - page değişkenini tanımlar
+    # Sayfa Seçimi (Tek Değişken)
     page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
 
 def get_participant_selection():
@@ -292,7 +292,12 @@ elif page == "Dashboard":
             target_df = df_history[df_history['gorunen_isim'].isin(usr_filter) & df_history['yil'].isin(yr_filter)].copy()
             x_axis_col = "tahmin_tarihi"; x_label = "Tahmin Giriş Tarihi"; sort_col = "tahmin_tarihi"; tick_format = "%d-%m-%Y"
         else:
-            target_df = df_latest[df_latest['kategori'].isin(cat_filter) & df_latest['anket_kaynagi'].isin(src_filter) & df_latest['gorunen_isim'].isin(usr_filter) & df_latest['yil'].isin(yr_filter)].copy()
+            target_df = df_latest[
+                df_latest['kategori'].isin(cat_filter) & 
+                df_latest['anket_kaynagi'].isin(src_filter) & 
+                df_latest['gorunen_isim'].isin(usr_filter) & 
+                df_latest['yil'].isin(yr_filter)
+            ].copy()
             x_axis_col = "donem"; x_label = "Hedef Dönem"; sort_col = "donem_date"; tick_format = None
 
         if target_df.empty: st.warning("Veri bulunamadı."); st.stop()
@@ -349,7 +354,7 @@ elif page == "Dashboard":
             st.download_button("⬇️ İndir", create_pdf_report(target_df, report_figures), "Rapor.pdf", "application/pdf")
 
 # ========================================================
-# SAYFA: ISI HARİTASI (GELİŞMİŞ VERSİYON)
+# SAYFA: ISI HARİTASI (GELİŞMİŞ)
 # ========================================================
 elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
@@ -412,14 +417,14 @@ elif page == "🔥 Isı Haritası":
                         if prev is not None:
                             if val > prev: st='background-color: #FFCDD2; color: #B71C1C; font-weight: bold; border: 1px solid white;'
                             elif val < prev: st='background-color: #C8E6C9; color: #1B5E20; font-weight: bold; border: 1px solid white;'
-                            else: st='color: #555;'
+                            else: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'
                     styles.at[idx, col] = st
                     prev = val
             return styles
 
         st.markdown(f"### 🔥 {sel_metric_label} Analizi")
         st.dataframe(pivot_df.style.apply(highlight, axis=None).format("{:.2f}"), use_container_width=True, height=len(sel_users)*50+100)
-        st.caption("🟡: İlk Veri | 🔴: Yükseliş | 🟢: Düşüş")
+        st.caption("🟡: İlk Veri/Değişim Yok | 🔴: Yükseliş | 🟢: Düşüş")
     else: st.info("Veri yok.")
 
 # ========================================================
@@ -477,3 +482,30 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
+
+# ========================================================
+# SAYFA: KATILIMCI YÖNETİMİ
+# ========================================================
+elif page == "Katılımcı Yönetimi":
+    st.header("👥 Katılımcı Yönetimi")
+    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
+        with st.form("new_kat"):
+            c1, c2 = st.columns(2)
+            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
+            src = st.text_input("Kaynak (Opsiyonel)")
+            if st.form_submit_button("Ekle"):
+                if ad:
+                    try: 
+                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
+                        st.toast("Eklendi")
+                    except: st.error("Hata")
+    
+    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    df = pd.DataFrame(res.data)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
+        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
+            st.rerun()
