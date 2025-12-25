@@ -238,7 +238,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 if c3.button("🗑️", key=f"d{row['id']}"): supabase.table(TABLE_TAHMIN).delete().eq("id", int(row['id'])).execute(); st.rerun()
 
 # ========================================================
-# SAYFA: ISI HARİTASI (YENİ)
+# SAYFA: ISI HARİTASI (DÜZELTİLDİ)
 # ========================================================
 elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
@@ -272,7 +272,8 @@ elif page == "🔥 Isı Haritası":
 
         df_filtered = df[df['gorunen_isim'].isin(sel_users) & df['donem'].isin(sel_periods)]
         pivot_df = df_filtered.pivot(index='gorunen_isim', columns='donem', values=sel_metric)
-        pivot_df = pivot_df.reindex(columns=sorted(pivot_df.columns), axis=1)
+        # HATA DÜZELTME BURADA: axis=1 KALDIRILDI
+        pivot_df = pivot_df.reindex(columns=sorted(pivot_df.columns))
 
         def highlight_changes(data):
             styles = pd.DataFrame('', index=data.index, columns=data.columns)
