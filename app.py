@@ -25,7 +25,6 @@ st.markdown("""
     .stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
     h1, h2, h3 { color: #2c3e50; }
-    /* Tablo genişlik ayarı */
     div[data-testid="stDataFrame"] { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
@@ -70,27 +69,59 @@ def clean_and_sort_data(df):
         "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
         "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz",
         "tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf",
-        "tahmin_yillik_enf", "min_yillik_enf", "max_yillik_enf",
         "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf",
         "katilimci_sayisi"
     ]
     for col in numeric_cols:
         if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # Sıralama için geçici tarih sütunu
     if "donem" in df.columns:
         df["donem_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="donem_date")
     return df
 
+# --- AKILLI ARALIK AYRIŞTIRICI (YENİ) ---
+def parse_range_input(text_input, default_median=0.0):
+    """
+    '20-23', '20 - 23', '20/23' gibi girdileri ayıklar.
+    Döndürür: (Medyan, Min, Max)
+    Eğer text boşsa veya hatalıysa, default_median döner (Min/Max None olur).
+    """
+    if not text_input or text_input.strip() == "":
+        return default_median, 0.0, 0.0, False # False = Aralık kullanılmadı
+
+    try:
+        # Temizlik
+        text = text_input.replace(',', '.') # Virgülleri nokta yap
+        
+        parts = []
+        if '-' in text: parts = text.split('-')
+        elif '/' in text: parts = text.split('/')
+        
+        if len(parts) == 2:
+            v1 = float(parts[0].strip())
+            v2 = float(parts[1].strip())
+            mn = min(v1, v2)
+            mx = max(v1, v2)
+            md = (mn + mx) / 2
+            return md, mn, mx, True # True = Aralık başarıyla kullanıldı
+    except:
+        pass
+    
+    return default_median, 0.0, 0.0, False
+
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     date_str = forecast_date.strftime("%Y-%m-%d")
     check_res = supabase.table(TABLE_TAHMIN).select("id").eq("kullanici_adi", user).eq("donem", period).eq("tahmin_tarihi", date_str).execute()
+    
+    # 0.0 olan değerleri None yap (Veritabanı temizliği için)
     clean_data = {k: (v if v != 0 else None) for k, v in data_dict.items()}
+    
     clean_data.update({
         "kullanici_adi": user, "donem": period, "kategori": category,
         "tahmin_tarihi": date_str, "kaynak_link": link if link else None
     })
+    
     if check_res.data:
         record_id = check_res.data[0]['id']
         supabase.table(TABLE_TAHMIN).update(clean_data).eq("id", record_id).execute()
@@ -202,13 +233,11 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                     "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf"
                 ]
                 final_cols = [c for c in full_view_cols if c in df_f.columns]
-                
                 col_cfg = {
                     "kaynak_link": st.column_config.LinkColumn("Link", display_text="🔗"),
                     "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"),
                     **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c or "min" in c or "max" in c}
                 }
-                
                 st.dataframe(df_f[final_cols].sort_values(by="tahmin_tarihi", ascending=False), column_config=col_cfg, use_container_width=True, height=600)
                 
                 if not df_f.empty:
@@ -329,7 +358,6 @@ elif page == "Dashboard":
         df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
         df['hover_text'] = df.apply(lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}" if pd.notnull(x['katilimci_sayisi']) else "", axis=1)
         df['kategori'] = df['kategori'].fillna('Bireysel')
-        # NaN kaynakları doldur
         df['anket_kaynagi'] = df['anket_kaynagi'].fillna('-')
         
         c1, c2, c3 = st.columns(3)
@@ -346,39 +374,26 @@ elif page == "Dashboard":
                 manual_median_val = st.number_input("Manuel Değer", step=0.01, format="%.2f")
             st.markdown("---")
             
-            # 1. Kategori
+            # KATEGORİ
             cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
             
-            # 2. Kaynak (YENİ EKLENDİ)
-            # Seçili kategorideki kaynakları bul
+            # KAYNAK (YENİ)
             avail_sources = sorted(df[df['kategori'].isin(cat_filter)]['anket_kaynagi'].astype(str).unique())
             source_filter = st.multiselect("Kaynak", avail_sources, default=avail_sources)
             
-            # 3. Katılımcı (Kategori + Kaynak bazlı filtre)
-            users_in_context = df[
-                df['kategori'].isin(cat_filter) & 
-                df['anket_kaynagi'].isin(source_filter)
-            ]['gorunen_isim'].unique()
+            # KATILIMCI
+            users_in_context = df[df['kategori'].isin(cat_filter) & df['anket_kaynagi'].isin(source_filter)]['gorunen_isim'].unique()
             user_filter = st.multiselect("Katılımcı", sorted(users_in_context), default=sorted(users_in_context))
             
-            # 4. Yıl
             df['yil'] = df['donem'].apply(lambda x: x.split('-')[0])
             year_filter = st.multiselect("Yıl", sorted(df['yil'].unique()), default=sorted(df['yil'].unique()))
 
-        # FİLTRE UYGULAMA
-        df_filtered = df[
-            df['kategori'].isin(cat_filter) & 
-            df['anket_kaynagi'].isin(source_filter) & 
-            df['gorunen_isim'].isin(user_filter) & 
-            df['yil'].isin(year_filter)
-        ]
-        
+        df_filtered = df[df['kategori'].isin(cat_filter) & df['anket_kaynagi'].isin(source_filter) & df['gorunen_isim'].isin(user_filter) & df['yil'].isin(year_filter)]
         if df_filtered.empty: st.warning("Veri bulunamadı."); st.stop()
 
         tabs = st.tabs(["📈 Zaman Serisi", "📍 Dağılım Analizi", "📦 Kutu Grafiği"])
         report_figures = {}
 
-        # 1. ZAMAN SERİSİ
         with tabs[0]:
             def plot_chart(y_col, min_c, max_c, title):
                 fig = px.line(df_filtered.sort_values("donem_date"), x="donem", y=y_col, color="gorunen_isim", markers=True, title=title, hover_data=["hover_text"])
@@ -396,7 +411,6 @@ elif page == "Dashboard":
             with c3: report_figures["Ay Enf"] = plot_chart("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enflasyon")
             with c4: report_figures["YS Enf"] = plot_chart("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enflasyon")
 
-        # 2. DAĞILIM
         with tabs[1]:
             all_periods = sorted(list(df_filtered['donem'].unique()), reverse=True)
             target_period = st.selectbox("Dönem Seç", all_periods, key="dot_period")
@@ -419,7 +433,6 @@ elif page == "Dashboard":
                 else: st.info("Veri yok.")
             else: st.info("Veri yok.")
 
-        # 3. KUTU GRAFİĞİ
         with tabs[2]:
             met_map_box = {"PPK": "tahmin_ppk_faiz", "Yıl Sonu Faiz": "tahmin_yilsonu_faiz", "Aylık Enf": "tahmin_aylik_enf", "Yıl Sonu Enf": "tahmin_yilsonu_enf"}
             sel_box_m = st.selectbox("Veri Seti", list(met_map_box.keys()))
@@ -448,32 +461,72 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             st.markdown("---")
             data = {}
             kat_sayisi = 0
+            
             if page == "PPK Girişi":
                 c_p1, c_p2 = st.columns(2)
                 with c_p1: 
                     st.markdown("### 1. Bu Ayki Karar")
+                    # ARALIK GİRİŞİ 1
+                    range_ppk = st.text_input("🧮 Aralık (Örn: 42-45)", key="rng_ppk", help="Burayı doldurursanız sayısal alanlar ezilir.")
                     val_faiz = st.number_input("Medyan %", step=0.25, format="%.2f")
+                
                 with c_p2:
                     st.markdown("### 2. Sene Sonu")
+                    # ARALIK GİRİŞİ 2
+                    range_ys = st.text_input("🧮 Aralık (Örn: 30-35)", key="rng_ys", help="Burayı doldurursanız sayısal alanlar ezilir.")
                     val_ys = st.number_input("Medyan % (YS)", step=0.25, format="%.2f", key="ysf")
+                
                 with st.expander("Detaylar (Min/Max/N)"):
                     ec1, ec2, ec3 = st.columns(3)
                     min_f = ec1.number_input("Min", step=0.25); max_f = ec1.number_input("Max", step=0.25)
                     min_ys = ec2.number_input("Min YS", step=0.25); max_ys = ec2.number_input("Max YS", step=0.25)
                     kat_sayisi = ec3.number_input("N", step=1)
-                data = {"tahmin_ppk_faiz": val_faiz, "min_ppk_faiz": min_f, "max_ppk_faiz": max_f, "tahmin_yilsonu_faiz": val_ys, "min_yilsonu_faiz": min_ys, "max_yilsonu_faiz": max_ys}
+                
+                # PARSING LOGIC
+                # 1. PPK
+                md, mn, mx, ok = parse_range_input(range_ppk, val_faiz)
+                if ok: val_faiz, min_f, max_f = md, mn, mx
+                # 2. YS
+                md2, mn2, mx2, ok2 = parse_range_input(range_ys, val_ys)
+                if ok2: val_ys, min_ys, max_ys = md2, mn2, mx2
+
+                data = {
+                    "tahmin_ppk_faiz": val_faiz, "min_ppk_faiz": min_f, "max_ppk_faiz": max_f,
+                    "tahmin_yilsonu_faiz": val_ys, "min_yilsonu_faiz": min_ys, "max_yilsonu_faiz": max_ys
+                }
+
             else: # Enflasyon
                 cm1, cm2, cm3 = st.columns(3)
-                va = cm1.number_input("1. Aylık Medyan", step=0.1)
-                vy = cm2.number_input("2. Yıllık Medyan", step=0.1)
-                vys = cm3.number_input("3. YS Medyan", step=0.1)
+                with cm1:
+                    r1 = st.text_input("Aralık Ay", key="r1"); va = st.number_input("1. Aylık Medyan", step=0.1)
+                with cm2:
+                    r2 = st.text_input("Aralık Yıl", key="r2"); vy = st.number_input("2. Yıllık Medyan", step=0.1)
+                with cm3:
+                    r3 = st.text_input("Aralık YS", key="r3"); vys = st.number_input("3. YS Medyan", step=0.1)
+                
                 with st.expander("Detaylar (Min/Max/N)"):
                     ec1, ec2, ec3 = st.columns(3)
                     mina=ec1.number_input("Min Ay", step=0.1); maxa=ec1.number_input("Max Ay", step=0.1)
                     miny=ec2.number_input("Min Yıl", step=0.1); maxy=ec2.number_input("Max Yıl", step=0.1)
                     minys=ec3.number_input("Min YS", step=0.1); maxys=ec3.number_input("Max YS", step=0.1)
                     kat_sayisi = st.number_input("N", step=1)
-                data = {"tahmin_aylik_enf": va, "min_aylik_enf": mina, "max_aylik_enf": maxa, "tahmin_yillik_enf": vy, "min_yillik_enf": miny, "max_yillik_enf": maxy, "tahmin_yilsonu_enf": vys, "min_yilsonu_enf": minys, "max_yilsonu_enf": maxys}
+                
+                # Parsing
+                md1, mn1, mx1, ok1 = parse_range_input(r1, va)
+                if ok1: va, mina, maxa = md1, mn1, mx1
+                
+                md2, mn2, mx2, ok2 = parse_range_input(r2, vy)
+                if ok2: vy, miny, maxy = md2, mn2, mx2
+                
+                md3, mn3, mx3, ok3 = parse_range_input(r3, vys)
+                if ok3: vys, minys, maxys = md3, mn3, mx3
+
+                data = {
+                    "tahmin_aylik_enf": va, "min_aylik_enf": mina, "max_aylik_enf": maxa,
+                    "tahmin_yillik_enf": vy, "min_yillik_enf": miny, "max_yillik_enf": maxy,
+                    "tahmin_yilsonu_enf": vys, "min_yilsonu_enf": minys, "max_yilsonu_enf": maxys
+                }
+
             data["katilimci_sayisi"] = int(kat_sayisi) if kat_sayisi > 0 else 0
             
             if st.form_submit_button("✅ Kaydet"):
