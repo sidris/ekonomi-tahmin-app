@@ -11,7 +11,7 @@ import io
 import datetime
 import time
 import requests
-import xlsxwriter # Excel grafikleri için kritik
+import xlsxwriter
 
 # --- WORD KÜTÜPHANESİ ---
 try:
@@ -101,12 +101,8 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- YENİ: EDİTLENEBİLİR EXCEL GRAFİK MOTORU ---
+# --- DÜZELTİLMİŞ EXCEL GRAFİK MOTORU (Hata Çözümü) ---
 def create_excel_dashboard(df_source):
-    """
-    Verilen DataFrame'den (native) Excel grafikleri içeren bir .xlsx oluşturur.
-    Grafikler Excel içinde düzenlenebilir nesnelerdir.
-    """
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     
@@ -118,46 +114,50 @@ def create_excel_dashboard(df_source):
     # 1. HAM VERİ SAYFASI
     ws_raw = workbook.add_worksheet("Ham Veri")
     ws_raw.write_row('A1', df_source.columns, bold)
+    
+    # Verileri yazarken NaN/None kontrolü (HATA BURADAYDI)
     for r, row in enumerate(df_source.values):
         for c, val in enumerate(row):
-            # Tarihleri düzgün yaz
+            # Eğer değer boşsa (NaN, None, NaT), boş string yaz ve geç
+            if pd.isna(val):
+                ws_raw.write_string(r+1, c, "")
+                continue
+                
             if isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)):
                 ws_raw.write_datetime(r+1, c, val, date_fmt)
             else:
                 ws_raw.write(r+1, c, val)
 
-    # GRAFİK OLUŞTURUCU YARDIMCI FONKSİYONU
+    # Grafik oluşturucu
     def create_sheet_with_chart(metric_col, sheet_name, chart_title):
-        # Pivotlama: Satırlar=Dönem, Sütunlar=Katılımcı, Değer=Metrik
-        # Önce veriyi sırala
         df_sorted = df_source.sort_values("donem_date")
         try:
             pivot = df_sorted.pivot(index='donem', columns='gorunen_isim', values=metric_col)
-        except:
-            return # Hata varsa (örn veri yoksa) atla
+        except: return
             
         ws = workbook.add_worksheet(sheet_name)
-        
-        # Veriyi Yazma (A1'den itibaren)
         ws.write('A1', 'Dönem', bold)
         ws.write_row('B1', pivot.columns, bold)
         ws.write_column('A2', pivot.index)
         
+        # Pivot verisini yazarken de NaN kontrolü yapalım
         for i, col_name in enumerate(pivot.columns):
-            ws.write_column(1, i+1, pivot[col_name], num_fmt)
+            col_data = pivot[col_name]
+            for r_idx, val in enumerate(col_data):
+                if pd.isna(val):
+                    ws.write_string(r_idx+1, i+1, "")
+                else:
+                    ws.write_number(r_idx+1, i+1, val, num_fmt)
             
-        # Grafik Nesnesi Oluştur (Çizgi Grafik)
         chart = workbook.add_chart({'type': 'line'})
-        
-        # Serileri Ekle
         num_rows = len(pivot)
         num_cols = len(pivot.columns)
         
         for i in range(num_cols):
             chart.add_series({
-                'name':       [sheet_name, 0, i + 1],  # Sütun Başlığı (Kişi Adı)
-                'categories': [sheet_name, 1, 0, num_rows, 0], # X Ekseni (Dönemler)
-                'values':     [sheet_name, 1, i + 1, num_rows, i + 1], # Y Değerleri
+                'name':       [sheet_name, 0, i + 1],
+                'categories': [sheet_name, 1, 0, num_rows, 0],
+                'values':     [sheet_name, 1, i + 1, num_rows, i + 1],
                 'marker':     {'type': 'circle', 'size': 5},
                 'line':       {'width': 2.25}
             })
@@ -166,11 +166,8 @@ def create_excel_dashboard(df_source):
         chart.set_x_axis({'name': 'Dönem'})
         chart.set_y_axis({'name': 'Oran (%)', 'major_gridlines': {'visible': True}})
         chart.set_size({'width': 800, 'height': 450})
-        
-        # Grafiği Sayfaya Göm
         ws.insert_chart('E2', chart)
 
-    # 2. GRAFİK SAYFALARI
     create_sheet_with_chart('tahmin_ppk_faiz', 'PPK Analiz', 'PPK Faiz Beklentileri')
     create_sheet_with_chart('tahmin_yilsonu_enf', 'Enflasyon Analiz', 'Yıl Sonu Enflasyon Beklentileri')
     create_sheet_with_chart('tahmin_yilsonu_faiz', 'YS Faiz Analiz', 'Yıl Sonu Faiz Beklentileri')
@@ -178,11 +175,9 @@ def create_excel_dashboard(df_source):
     workbook.close()
     return output.getvalue()
 
-# --- WORD RAPOR OLUŞTURUCU (DOCX) ---
+# --- WORD RAPOR OLUŞTURUCU ---
 def create_word_report(report_data):
     doc = Document()
-    
-    # Logo
     logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
     try:
         r = requests.get(logo_url, timeout=5)
@@ -192,13 +187,10 @@ def create_word_report(report_data):
                 logo_par.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 run = logo_par.add_run()
                 run.add_picture(image_stream, width=Inches(1.2))
-    except:
-        pass
+    except: pass
 
-    # Başlık
     title = doc.add_heading(report_data['title'], 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
     p_info = doc.add_paragraph()
     p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run_unit = p_info.add_run(report_data['unit'] + "\n")
@@ -206,7 +198,6 @@ def create_word_report(report_data):
     run_unit.font.size = Pt(12)
     run_date = p_info.add_run(report_data['date'])
     run_date.italic = True
-
     doc.add_paragraph("") 
 
     if report_data['body']:
@@ -215,7 +206,6 @@ def create_word_report(report_data):
 
     for block in report_data['content_blocks']:
         doc.add_paragraph("")
-        
         if block.get('title'):
             h = doc.add_heading(block['title'], level=2)
             h.runs[0].font.color.rgb = RGBColor(180, 0, 0)
@@ -344,10 +334,7 @@ def get_participant_selection():
     row = df[df["ad_soyad"] == name_map[sel]].iloc[0]
     return name_map[sel], row['kategori'], sel
 
-# ... (DİĞER SAYFALAR AYNI KALDI) ...
-# ========================================================
-# SAYFA: GELİŞMİŞ VERİ HAVUZU
-# ========================================================
+# ... (GELİŞMİŞ VERİ HAVUZU - AYNI KOD) ...
 if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
@@ -426,6 +413,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 if c2.button("✏️", key=f"e{row['id']}"): st.session_state['edit_target'] = row; st.rerun()
                                 if c3.button("🗑️", key=f"d{row['id']}"): supabase.table(TABLE_TAHMIN).delete().eq("id", int(row['id'])).execute(); st.rerun()
 
+# ... (DİĞER SAYFALAR AYNI) ...
 # ========================================================
 # SAYFA: DASHBOARD
 # ========================================================
@@ -521,7 +509,7 @@ elif page == "Dashboard":
                 mv = manual_median_val if calc_method == "Manuel" else dp[mc].median()
                 dp = dp.sort_values(by=mc)
                 fig = go.Figure()
-                y_val = dp['tahmin_tarihi'].dt.strftime('%d-%m-%Y') if (is_revizyon_mode and len(usr_filter)==1) else dp['gorunen_isim']
+                y_val = dp['tahmin_tarihi'].dt.strftime('%d-%m-%Y') if (is_single_user) else dp['gorunen_isim']
                 fig.add_trace(go.Scatter(x=dp[mc], y=y_val, mode='markers', marker=dict(size=14, color='#1976D2', line=dict(width=1, color='white')), name='Tahmin', text=[f"%{v:.2f}" for v in dp[mc]], hoverinfo='text'))
                 fig.add_vline(x=mv, line_width=3, line_color="red")
                 fig.add_annotation(x=mv, y=-0.1, text=f"MEDYAN %{mv:.2f}", showarrow=False, font=dict(color="red", size=14, weight="bold"), yref="paper")
@@ -532,7 +520,7 @@ elif page == "Dashboard":
         with tabs[2]:
             mb = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
             sb = st.selectbox("Veri Seti", list(mb.keys()))
-            fig = px.box(target_df.sort_values(sort_col), x=x_col, y=mb[sb], color="donem", title=f"{sb} Dağılımı")
+            fig = px.box(target_df.sort_values("donem_date"), x="donem", y=mb[sb], color="donem", title=f"{sb} Dağılımı")
             st.plotly_chart(fig, use_container_width=True)
 
 # ========================================================
