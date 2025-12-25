@@ -145,10 +145,9 @@ if not st.session_state['giris_yapildi']:
             st.session_state['giris_yapildi'] = True; st.rerun()
         st.stop()
 
-# --- SIDEBAR & PAGE SELECTION ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("📊 Menü")
-    # Sayfa Seçimi (Tek Değişken)
     page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
 
 def get_participant_selection():
@@ -285,7 +284,6 @@ elif page == "Dashboard":
             usr_filter = st.multiselect("Katılımcı", avail_usr, default=avail_usr)
             yr_filter = st.multiselect("Yıl", sorted(df_latest['yil'].unique()), default=sorted(df_latest['yil'].unique()))
 
-        # MANTIK: Tek kullanıcı seçildiyse Revizyon Tarihçesi (X=Tarih), Çokluysa Dönem (X=Dönem)
         is_single_user = (len(usr_filter) == 1)
         
         if is_single_user:
@@ -393,11 +391,19 @@ elif page == "🔥 Isı Haritası":
                 piv_col = 'donem'
             else:
                 target_period = c3.selectbox("Hangi Hedefin Geçmişini İzliceksiniz?", all_periods)
+                # YENİ EKLENEN: ZAMAN DİLİMİ (FREKANS)
+                time_granularity = c3.radio("Zaman Dilimi", ["🗓️ Aylık (Son Veri)", "📆 Günlük (Detaylı)"])
+                
                 if not sel_users or not target_period: st.stop()
                 df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & (df_full['donem'] == target_period)].copy()
-                df_f['tahmin_ayi'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
-                df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'tahmin_ayi'], keep='last')
-                piv_col = 'tahmin_ayi'
+                
+                if "Günlük" in time_granularity:
+                    df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
+                else:
+                    df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
+                
+                df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'tahmin_zaman'], keep='last')
+                piv_col = 'tahmin_zaman'
 
         if df_f.empty: st.warning("Veri yok."); st.stop()
 
@@ -412,19 +418,28 @@ elif page == "🔥 Isı Haritası":
                     val = row[col]
                     if pd.isna(val): continue
                     st = ''
-                    if not first: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'; first=True
+                    if not first: 
+                        # İLK DEĞER = SARI
+                        st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'
+                        first=True
                     else:
                         if prev is not None:
-                            if val > prev: st='background-color: #FFCDD2; color: #B71C1C; font-weight: bold; border: 1px solid white;'
-                            elif val < prev: st='background-color: #C8E6C9; color: #1B5E20; font-weight: bold; border: 1px solid white;'
-                            else: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'
+                            if val > prev: 
+                                # YÜKSELİŞ = KIRMIZI
+                                st='background-color: #FFCDD2; color: #B71C1C; font-weight: bold; border: 1px solid white;'
+                            elif val < prev: 
+                                # DÜŞÜŞ = YEŞİL
+                                st='background-color: #C8E6C9; color: #1B5E20; font-weight: bold; border: 1px solid white;'
+                            else: 
+                                # DEĞİŞİM YOK = SARI DEVAM (İsteğe göre ayarlandı)
+                                st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'
                     styles.at[idx, col] = st
                     prev = val
             return styles
 
         st.markdown(f"### 🔥 {sel_metric_label} Analizi")
         st.dataframe(pivot_df.style.apply(highlight, axis=None).format("{:.2f}"), use_container_width=True, height=len(sel_users)*50+100)
-        st.caption("🟡: İlk Veri/Değişim Yok | 🔴: Yükseliş | 🟢: Düşüş")
+        st.caption("🟡: İlk Veri / Değişim Yok | 🔴: Yükseliş | 🟢: Düşüş")
     else: st.info("Veri yok.")
 
 # ========================================================
@@ -482,30 +497,3 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
-
-# ========================================================
-# SAYFA: KATILIMCI YÖNETİMİ
-# ========================================================
-elif page == "Katılımcı Yönetimi":
-    st.header("👥 Katılımcı Yönetimi")
-    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
-        with st.form("new_kat"):
-            c1, c2 = st.columns(2)
-            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
-            src = st.text_input("Kaynak (Opsiyonel)")
-            if st.form_submit_button("Ekle"):
-                if ad:
-                    try: 
-                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
-                        st.toast("Eklendi")
-                    except: st.error("Hata")
-    
-    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
-    df = pd.DataFrame(res.data)
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
-        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
-            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
-            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
-            st.rerun()
