@@ -191,52 +191,36 @@ def create_excel_dashboard(df_source):
 
     # 3. EXCEL ISI HARİTASI (CONDITIONAL FORMATTING)
     def create_heatmap_sheet(metric_col, sheet_name):
-        # Pivot: Satırlar=Katılımcı, Sütunlar=Dönem
         try:
-            # Sıralama: En son dönem en sağda olsun
             df_s = df_source.sort_values("donem_date")
             pivot = df_s.pivot(index='gorunen_isim', columns='donem', values=metric_col)
         except: return
 
         ws = workbook.add_worksheet(sheet_name)
-        
-        # Başlıklar
         ws.write('A1', 'Katılımcı / Dönem', bold)
         ws.write_row('B1', pivot.columns, bold)
         ws.write_column('A2', pivot.index, bold)
         
-        # Verileri Yaz
         for i, col_name in enumerate(pivot.columns):
             col_data = pivot[col_name]
             for r_idx, val in enumerate(col_data):
                 if pd.isna(val): ws.write_string(r_idx+1, i+1, "")
                 else: ws.write_number(r_idx+1, i+1, val, num_fmt)
         
-        # Koşullu Biçimlendirme (3 Renk Skalası: Yeşil-Sarı-Kırmızı)
-        # Genellikle Enflasyon/Faiz için Düşük=İyi(Yeşil), Yüksek=Kötü(Kırmızı)
-        # Eğer tersi istenirse renk kodları değiştirilebilir.
         last_row = len(pivot)
         last_col = len(pivot.columns)
         
         ws.conditional_format(1, 1, last_row, last_col, {
             'type': '3_color_scale',
-            'min_color': '#63BE7B', # Yeşil (Düşük)
-            'mid_color': '#FFEB84', # Sarı (Orta)
-            'max_color': '#F8696B'  # Kırmızı (Yüksek)
+            'min_color': '#63BE7B', 'mid_color': '#FFEB84', 'max_color': '#F8696B'
         })
-        
-        # Sütun genişliklerini ayarla
-        ws.set_column(0, 0, 25) # İsim sütunu geniş
-        ws.set_column(1, last_col, 10) # Veri sütunları
+        ws.set_column(0, 0, 25)
+        ws.set_column(1, last_col, 10)
 
-    # ÇİZGİ GRAFİK SAYFALARI
     create_sheet_with_chart('tahmin_ppk_faiz', '📈 PPK Grafiği', 'PPK Faiz Beklentileri')
     create_sheet_with_chart('tahmin_yilsonu_enf', '📈 Enflasyon Grafiği', 'Yıl Sonu Enflasyon Beklentileri')
-    
-    # ISI HARİTASI SAYFALARI (YENİ)
     create_heatmap_sheet('tahmin_ppk_faiz', '🔥 Isı Haritası - PPK')
     create_heatmap_sheet('tahmin_yilsonu_enf', '🔥 Isı Haritası - Enf')
-    create_heatmap_sheet('tahmin_yilsonu_faiz', '🔥 Isı Haritası - YS Faiz')
 
     workbook.close()
     return output.getvalue()
@@ -452,7 +436,6 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                             nd = c1.date_input("Tarih", pd.to_datetime(t.get('tahmin_tarihi')).date())
                             ndo = c2.selectbox("Dönem", tum_donemler, index=tum_donemler.index(t['donem']) if t['donem'] in tum_donemler else 0)
                             nl = c3.text_input("Link", t.get('kaynak_link') or "")
-                            
                             def g(k): return float(t.get(k) or 0)
                             tp, te = st.tabs(["Faiz", "Enflasyon"])
                             with tp:
@@ -464,7 +447,6 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 c1, c2 = st.columns(2)
                                 na = c1.number_input("Ay Enf", value=g('tahmin_aylik_enf'), step=0.1)
                                 nye = c2.number_input("YS Enf", value=g('tahmin_yilsonu_enf'), step=0.1)
-                            
                             if st.form_submit_button("Kaydet"):
                                 def cv(v): return v if v!=0 else None
                                 upd = {"tahmin_tarihi": nd.strftime('%Y-%m-%d'), "donem": ndo, "kaynak_link": nl if nl else None, "katilimci_sayisi": int(nk), "tahmin_ppk_faiz": cv(npk), "tahmin_yilsonu_faiz": cv(nyf), "tahmin_aylik_enf": cv(na), "tahmin_yilsonu_enf": cv(nye)}
@@ -528,17 +510,11 @@ elif page == "Dashboard":
             yr_filter = st.multiselect("Yıl", sorted(df_latest['yil'].unique()), default=sorted(df_latest['yil'].unique()))
 
         is_single_user = (len(usr_filter) == 1)
-        
         if is_single_user:
             target_df = df_history[df_history['gorunen_isim'].isin(usr_filter) & df_history['yil'].isin(yr_filter)].copy()
             x_axis_col = "tahmin_tarihi"; x_label = "Tahmin Giriş Tarihi"; sort_col = "tahmin_tarihi"; tick_format = "%d-%m-%Y"
         else:
-            target_df = df_latest[
-                df_latest['kategori'].isin(cat_filter) & 
-                df_latest['anket_kaynagi'].isin(src_filter) & 
-                df_latest['gorunen_isim'].isin(usr_filter) & 
-                df_latest['yil'].isin(yr_filter)
-            ].copy()
+            target_df = df_latest[df_latest['kategori'].isin(cat_filter) & df_latest['anket_kaynagi'].isin(src_filter) & df_latest['gorunen_isim'].isin(usr_filter) & df_latest['yil'].isin(yr_filter)].copy()
             x_axis_col = "donem"; x_label = "Hedef Dönem"; sort_col = "donem_date"; tick_format = None
 
         if target_df.empty: st.warning("Veri bulunamadı."); st.stop()
@@ -762,7 +738,7 @@ elif page == "📄 Rapor Oluştur":
                 st.download_button(label="⬇️ İndir", data=word_bytes, file_name="Rapor.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             else: st.error("İçerik yok.")
             
-        if c_btn3.button("📊 Excel Dashboard İndir (Editlenebilir Grafik)"):
+        if c_btn3.button("📊 Excel Dashboard İndir (Editlenebilir Grafik + Isı Haritası)"):
             if not df_rep.empty:
                 with st.spinner("Excel grafikleri oluşturuluyor..."):
                     excel_bytes = create_excel_dashboard(df_rep)
@@ -823,3 +799,30 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
+
+# ========================================================
+# SAYFA: KATILIMCI YÖNETİMİ
+# ========================================================
+elif page == "Katılımcı Yönetimi":
+    st.header("👥 Katılımcı Yönetimi")
+    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
+        with st.form("new_kat"):
+            c1, c2 = st.columns(2)
+            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
+            src = st.text_input("Kaynak (Opsiyonel)")
+            if st.form_submit_button("Ekle"):
+                if ad:
+                    try: 
+                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
+                        st.toast("Eklendi")
+                    except: st.error("Hata")
+    
+    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    df = pd.DataFrame(res.data)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
+        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
+            st.rerun()
