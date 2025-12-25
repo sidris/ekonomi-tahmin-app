@@ -11,36 +11,21 @@ import io
 import datetime
 import time
 import requests
+import xlsxwriter # Excel grafikleri için kritik
 
-# --- WORD İÇİN GEREKLİ KÜTÜPHANELER ---
-# Eğer hata alırsanız: pip install python-docx
+# --- WORD KÜTÜPHANESİ ---
 try:
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml.ns import qn
 except ImportError:
-    st.error("Lütfen 'python-docx' kütüphanesini yükleyin: pip install python-docx")
+    st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter")
     st.stop()
 
 # --- 1. AYARLAR VE TASARIM ---
-st.set_page_config(
-    page_title="Finansal Tahmin Terminali", 
-    layout="wide",
-    page_icon="📊",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Finansal Tahmin Terminali", layout="wide", page_icon="📊", initial_sidebar_state="expanded")
 
-# Modern CSS
-st.markdown("""
-<style>
-    .stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
-    div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
-    h1, h2, h3 { color: #2c3e50; }
-    div[data-testid="stDataFrame"] { width: 100%; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown("""<style>.stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); } .stButton button { width: 100%; border-radius: 8px; font-weight: 600; } div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; } h1, h2, h3 { color: #2c3e50; } div[data-testid="stDataFrame"] { width: 100%; }</style>""", unsafe_allow_html=True)
 
 # --- BAĞLANTI ---
 try:
@@ -67,35 +52,22 @@ def get_period_list():
 
 tum_donemler = get_period_list()
 
-def normalize_name(name):
-    return name.strip().title() if name else ""
+def normalize_name(name): return name.strip().title() if name else ""
 
 def safe_int(val):
-    try:
-        if pd.isna(val) or val is None: return 0
-        return int(float(val))
+    try: return int(float(val)) if pd.notnull(val) else 0
     except: return 0
 
 def clean_and_sort_data(df):
     if df.empty: return df
-    numeric_cols = [
-        "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
-        "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz",
-        "tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf",
-        "tahmin_yillik_enf", "min_yillik_enf", "max_yillik_enf",
-        "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf",
-        "katilimci_sayisi"
-    ]
+    numeric_cols = ["tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "tahmin_yillik_enf", "min_yillik_enf", "max_yillik_enf", "tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "katilimci_sayisi"]
     for col in numeric_cols:
         if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
-    
     if "donem" in df.columns:
         df["donem_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="donem_date")
-    
     if "tahmin_tarihi" in df.columns:
         df["tahmin_tarihi"] = pd.to_datetime(df["tahmin_tarihi"])
-        
     return df
 
 def parse_range_input(text_input, default_median=0.0):
@@ -129,34 +101,104 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- YENİ: WORD RAPOR OLUŞTURUCU (DOCX) ---
+# --- YENİ: EDİTLENEBİLİR EXCEL GRAFİK MOTORU ---
+def create_excel_dashboard(df_source):
+    """
+    Verilen DataFrame'den (native) Excel grafikleri içeren bir .xlsx oluşturur.
+    Grafikler Excel içinde düzenlenebilir nesnelerdir.
+    """
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    
+    # Formatlar
+    bold = workbook.add_format({'bold': 1})
+    date_fmt = workbook.add_format({'num_format': 'dd/mm/yyyy'})
+    num_fmt = workbook.add_format({'num_format': '0.00'})
+    
+    # 1. HAM VERİ SAYFASI
+    ws_raw = workbook.add_worksheet("Ham Veri")
+    ws_raw.write_row('A1', df_source.columns, bold)
+    for r, row in enumerate(df_source.values):
+        for c, val in enumerate(row):
+            # Tarihleri düzgün yaz
+            if isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)):
+                ws_raw.write_datetime(r+1, c, val, date_fmt)
+            else:
+                ws_raw.write(r+1, c, val)
+
+    # GRAFİK OLUŞTURUCU YARDIMCI FONKSİYONU
+    def create_sheet_with_chart(metric_col, sheet_name, chart_title):
+        # Pivotlama: Satırlar=Dönem, Sütunlar=Katılımcı, Değer=Metrik
+        # Önce veriyi sırala
+        df_sorted = df_source.sort_values("donem_date")
+        try:
+            pivot = df_sorted.pivot(index='donem', columns='gorunen_isim', values=metric_col)
+        except:
+            return # Hata varsa (örn veri yoksa) atla
+            
+        ws = workbook.add_worksheet(sheet_name)
+        
+        # Veriyi Yazma (A1'den itibaren)
+        ws.write('A1', 'Dönem', bold)
+        ws.write_row('B1', pivot.columns, bold)
+        ws.write_column('A2', pivot.index)
+        
+        for i, col_name in enumerate(pivot.columns):
+            ws.write_column(1, i+1, pivot[col_name], num_fmt)
+            
+        # Grafik Nesnesi Oluştur (Çizgi Grafik)
+        chart = workbook.add_chart({'type': 'line'})
+        
+        # Serileri Ekle
+        num_rows = len(pivot)
+        num_cols = len(pivot.columns)
+        
+        for i in range(num_cols):
+            chart.add_series({
+                'name':       [sheet_name, 0, i + 1],  # Sütun Başlığı (Kişi Adı)
+                'categories': [sheet_name, 1, 0, num_rows, 0], # X Ekseni (Dönemler)
+                'values':     [sheet_name, 1, i + 1, num_rows, i + 1], # Y Değerleri
+                'marker':     {'type': 'circle', 'size': 5},
+                'line':       {'width': 2.25}
+            })
+            
+        chart.set_title({'name': chart_title})
+        chart.set_x_axis({'name': 'Dönem'})
+        chart.set_y_axis({'name': 'Oran (%)', 'major_gridlines': {'visible': True}})
+        chart.set_size({'width': 800, 'height': 450})
+        
+        # Grafiği Sayfaya Göm
+        ws.insert_chart('E2', chart)
+
+    # 2. GRAFİK SAYFALARI
+    create_sheet_with_chart('tahmin_ppk_faiz', 'PPK Analiz', 'PPK Faiz Beklentileri')
+    create_sheet_with_chart('tahmin_yilsonu_enf', 'Enflasyon Analiz', 'Yıl Sonu Enflasyon Beklentileri')
+    create_sheet_with_chart('tahmin_yilsonu_faiz', 'YS Faiz Analiz', 'Yıl Sonu Faiz Beklentileri')
+
+    workbook.close()
+    return output.getvalue()
+
+# --- WORD RAPOR OLUŞTURUCU (DOCX) ---
 def create_word_report(report_data):
-    """
-    Word (DOCX) raporu oluşturur. Google Docs ile tam uyumludur.
-    """
     doc = Document()
     
-    # 1. LOGO (Geçici indirip ekle)
-    # Wikimedia PNG linki (SVG değil)
+    # Logo
     logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
     try:
         r = requests.get(logo_url, timeout=5)
         if r.status_code == 200:
             with io.BytesIO(r.content) as image_stream:
-                # Logoyu sağa hizalamak için tablo hilesi veya paragraf hizalama kullanılabilir
-                # Basitçe sağa yaslı bir paragraf
                 logo_par = doc.add_paragraph()
                 logo_par.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 run = logo_par.add_run()
                 run.add_picture(image_stream, width=Inches(1.2))
-    except Exception as e:
-        doc.add_paragraph("[Logo Yüklenemedi]", style='Body Text')
+    except:
+        pass
 
-    # 2. BAŞLIK
+    # Başlık
     title = doc.add_heading(report_data['title'], 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Birim ve Tarih
     p_info = doc.add_paragraph()
     p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run_unit = p_info.add_run(report_data['unit'] + "\n")
@@ -165,124 +207,116 @@ def create_word_report(report_data):
     run_date = p_info.add_run(report_data['date'])
     run_date.italic = True
 
-    doc.add_paragraph("") # Boşluk
+    doc.add_paragraph("") 
 
-    # 3. METİN
     if report_data['body']:
         p_body = doc.add_paragraph(report_data['body'])
         p_body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
-    # 4. İÇERİK BLOKLARI
     for block in report_data['content_blocks']:
-        doc.add_paragraph("") # Ayraç
+        doc.add_paragraph("")
         
-        # Başlık
         if block.get('title'):
             h = doc.add_heading(block['title'], level=2)
-            run = h.runs[0]
-            run.font.color.rgb = RGBColor(180, 0, 0) # Kırmızımsı Başlık
+            h.runs[0].font.color.rgb = RGBColor(180, 0, 0)
 
-        # GRAFİK
         if block['type'] == 'chart':
-            # Plotly figürünü resme çevir
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
                 try:
                     block['fig'].write_image(tmpfile.name, width=1000, height=500, scale=2)
                     doc.add_picture(tmpfile.name, width=Inches(6.5))
-                except:
-                    doc.add_paragraph("[Grafik İşlenemedi]")
+                except: pass
             try: os.remove(tmpfile.name)
             except: pass
 
-        # TABLO
         elif block['type'] == 'table':
             df_table = block['df']
-            # Word Tablosu Oluştur
             table = doc.add_table(rows=1, cols=len(df_table.columns))
-            table.style = 'Light Shading Accent 1' # Word'ün hazır stili (Renkli)
-            
-            # Başlıklar
+            table.style = 'Light Shading Accent 1'
             hdr_cells = table.rows[0].cells
             for i, col_name in enumerate(df_table.columns):
                 hdr_cells[i].text = str(col_name)
-            
-            # Veriler
             for _, row in df_table.iterrows():
                 row_cells = table.add_row().cells
                 for i, item in enumerate(row):
                     row_cells[i].text = str(item)
 
-    # Dosyayı kaydet
     output = io.BytesIO()
     doc.save(output)
     return output.getvalue()
 
-# --- GELİŞMİŞ PDF MOTORU (Fallback fontlu) ---
+# --- PDF MOTORU ---
+def check_and_download_font():
+    paths = {"DejaVuSans.ttf": "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Regular.ttf", "DejaVuSans-Bold.ttf": "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Bold.ttf"}
+    try:
+        for p, u in paths.items():
+            if not os.path.exists(p) or os.path.getsize(p) < 1000:
+                r = requests.get(u, timeout=10)
+                if r.status_code == 200:
+                    with open(p, 'wb') as f: f.write(r.content)
+        if os.path.exists("DejaVuSans.ttf"): return "DejaVuSans.ttf", "DejaVuSans-Bold.ttf"
+    except: pass
+    return None, None
+
+def safe_str(text, fallback):
+    if not isinstance(text, str): return str(text)
+    if fallback:
+        tr = {'ğ':'g','Ğ':'G','ş':'s','Ş':'S','ı':'i','İ':'I','ö':'o','Ö':'O','ü':'u','Ü':'U','ç':'c','Ç':'C'}
+        for k,v in tr.items(): text = text.replace(k,v)
+    return text
+
 def create_custom_pdf_report(report_data):
-    # Standart Helvetica kullanarak hata riskini sıfıra indiriyoruz.
-    # Türkçe karakterleri temizliyoruz.
-    class TCMBReport(FPDF):
+    fr, fb = check_and_download_font()
+    use_cust = (fr is not None)
+    font = "DejaVu" if use_cust else "Helvetica"
+    fallback = not use_cust
+
+    class RPT(FPDF):
         def header(self):
-            # Logo PNG
             logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
-            logo_path = "temp_logo_pdf.png"
-            if not os.path.exists(logo_path):
-                try:
-                    headers = {'User-Agent': 'Mozilla/5.0'}
-                    r = requests.get(logo_url, headers=headers, timeout=5)
-                    if r.status_code == 200:
-                        with open(logo_path, 'wb') as f: f.write(r.content)
+            if not os.path.exists("logo_tmp.png"):
+                try: 
+                    r = requests.get(logo_url, headers={'User-Agent':'Mozilla/5.0'}, verify=False, timeout=5)
+                    if r.status_code==200:
+                        with open("logo_tmp.png",'wb') as f: f.write(r.content)
                 except: pass
-            if os.path.exists(logo_path):
-                self.image(logo_path, x=170, y=10, w=30)
+            if os.path.exists("logo_tmp.png"): self.image("logo_tmp.png", x=170, y=10, w=30)
             self.ln(25)
         def footer(self):
-            self.set_y(-15); self.set_font('Helvetica', 'I', 8)
-            self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
+            self.set_y(-15); self.set_font(font, '', 8); self.set_text_color(128); self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
 
-    def clean(text):
-        if not isinstance(text, str): return str(text)
-        tr_map = {'ğ':'g','Ğ':'G','ş':'s','Ş':'S','ı':'i','İ':'I','ö':'o','Ö':'O','ü':'u','Ü':'U','ç':'c','Ç':'C'}
-        for k,v in tr_map.items(): text = text.replace(k,v)
-        return text
+    pdf = RPT()
+    if use_cust:
+        pdf.add_font("DejaVu", "", fr, uni=True)
+        pdf.add_font("DejaVu", "B", fb, uni=True)
+    pdf.add_page(); pdf.set_text_color(0)
 
-    pdf = TCMBReport()
-    pdf.add_page()
-    pdf.set_font("Helvetica", 'B', 20)
-    pdf.cell(0, 10, clean(report_data['title']), ln=True)
-    pdf.set_font("Helvetica", '', 12)
-    pdf.cell(0, 8, clean(report_data['unit']), ln=True)
-    pdf.set_font("Helvetica", 'I', 10)
-    pdf.cell(0, 8, report_data['date'], ln=True, align='R')
-    pdf.ln(5)
+    pdf.set_font(font, 'B', 20); pdf.cell(0, 10, safe_str(report_data['title'], fallback), ln=True)
+    pdf.set_font(font, '', 12); pdf.set_text_color(80); pdf.cell(0, 8, safe_str(report_data['unit'], fallback), ln=True)
+    pdf.set_text_color(0); pdf.set_font(font, '', 10); pdf.cell(0, 8, safe_str(report_data['date'], fallback), ln=True, align='R'); pdf.ln(5)
     
     if report_data['body']:
-        pdf.set_font("Helvetica", '', 11)
-        pdf.multi_cell(0, 6, clean(report_data['body']))
-        pdf.ln(10)
+        pdf.set_font(font, '', 11); pdf.multi_cell(0, 6, safe_str(report_data['body'], fallback)); pdf.ln(10)
 
     for block in report_data['content_blocks']:
         if pdf.get_y() > 240: pdf.add_page()
         if block.get('title'):
-            pdf.set_font("Helvetica", 'B', 12)
-            pdf.cell(0, 10, clean(block['title']), ln=True)
+            pdf.set_font(font, 'B', 12); pdf.set_text_color(200, 0, 0); pdf.cell(0, 10, safe_str(block['title'], fallback), ln=True); pdf.set_text_color(0); pdf.ln(2)
         if block['type'] == 'chart':
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                try: block['fig'].write_image(tmp.name, width=1000, height=500, scale=2); pdf.image(tmp.name, x=15, w=180)
-                except: pdf.cell(0,10,"[Grafik Hatasi]",ln=True)
-            try: os.remove(tmp.name)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t:
+                try: block['fig'].write_image(t.name, width=1000, height=500, scale=2); pdf.image(t.name, x=15, w=180); pdf.ln(5)
+                except: pass
+            try: os.remove(t.name)
             except: pass
         elif block['type'] == 'table':
-            df = block['df']
-            pdf.set_font("Helvetica", '', 8)
-            with pdf.table() as t:
-                r = t.row()
-                for c in df.columns: r.cell(clean(str(c)), style=FontFace(emphasis="BOLD", fill_color=(220,220,220)))
+            df = block['df']; pdf.set_font(font, '', 8)
+            with pdf.table() as tbl:
+                r = tbl.row()
+                for c in df.columns: r.cell(safe_str(str(c), fallback), style=FontFace(emphasis="BOLD", color=255, fill_color=(200, 50, 50)))
                 for _, dr in df.iterrows():
-                    r = t.row()
-                    for item in dr: r.cell(clean(str(item)))
+                    r = tbl.row()
+                    for item in dr: r.cell(safe_str(str(item), fallback))
             pdf.ln(10)
-            
     return bytes(pdf.output())
 
 # --- AUTH ---
@@ -310,6 +344,7 @@ def get_participant_selection():
     row = df[df["ad_soyad"] == name_map[sel]].iloc[0]
     return name_map[sel], row['kategori'], sel
 
+# ... (DİĞER SAYFALAR AYNI KALDI) ...
 # ========================================================
 # SAYFA: GELİŞMİŞ VERİ HAVUZU
 # ========================================================
@@ -573,11 +608,11 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: RAPOR OLUŞTUR (GELİŞMİŞ WORD)
+# SAYFA: RAPOR OLUŞTUR
 # ========================================================
 elif page == "📄 Rapor Oluştur":
     st.header("📄 Profesyonel Rapor Oluşturucu")
-    st.info("Bu ekran, seçtiğiniz veri setine göre Word (veya PDF) rapor üretir.")
+    st.info("Raporunuzu Word (Docx) formatında indirip Google Docs ile düzenleyebilirsiniz. Ayrıca editlenebilir Excel grafikleri de alabilirsiniz.")
 
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
@@ -657,27 +692,28 @@ elif page == "📄 Rapor Oluştur":
 
         st.markdown("---")
         
-        # BUTONLAR
-        col_btn1, col_btn2 = st.columns(2)
-        
-        # PDF BUTONU
-        if col_btn1.button("📄 PDF Olarak İndir"):
+        c_btn1, c_btn2, c_btn3 = st.columns(3)
+        if c_btn1.button("📄 PDF İndir (Siyah/Beyaz/Güvenli)"):
             if not df_rep.empty and report_blocks:
                 r_data = {'title': rep_title, 'unit': rep_unit, 'date': rep_date.strftime('%d.%m.%Y'), 'body': rep_body, 'content_blocks': report_blocks}
-                with st.spinner("PDF hazırlanıyor..."):
-                    pdf_bytes = create_custom_pdf_report(r_data)
-                st.download_button(label="⬇️ Dosyayı Kaydet (PDF)", data=pdf_bytes, file_name="Rapor.pdf", mime="application/pdf")
+                with st.spinner("PDF hazırlanıyor..."): pdf_bytes = create_custom_pdf_report(r_data)
+                st.download_button(label="⬇️ İndir", data=pdf_bytes, file_name="Rapor.pdf", mime="application/pdf")
             else: st.error("İçerik yok.")
             
-        # WORD BUTONU (YENİ)
-        if col_btn2.button("📝 Word (Google Docs) Olarak İndir"):
+        if c_btn2.button("📝 Word İndir (Renkli & Logolu)"):
             if not df_rep.empty and report_blocks:
                 r_data = {'title': rep_title, 'unit': rep_unit, 'date': rep_date.strftime('%d.%m.%Y'), 'body': rep_body, 'content_blocks': report_blocks}
-                with st.spinner("Word dosyası hazırlanıyor..."):
-                    word_bytes = create_word_report(r_data)
-                st.download_button(label="⬇️ Dosyayı Kaydet (DOCX)", data=word_bytes, file_name="Rapor.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                with st.spinner("Word dosyası hazırlanıyor..."): word_bytes = create_word_report(r_data)
+                st.download_button(label="⬇️ İndir", data=word_bytes, file_name="Rapor.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             else: st.error("İçerik yok.")
             
+        if c_btn3.button("📊 Excel Dashboard İndir (Editlenebilir Grafik)"):
+            if not df_rep.empty:
+                with st.spinner("Excel grafikleri oluşturuluyor..."):
+                    excel_bytes = create_excel_dashboard(df_rep)
+                st.download_button(label="⬇️ İndir", data=excel_bytes, file_name="Dashboard.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            else: st.error("İçerik yok.")
+
     else: st.info("Veri yok.")
 
 # ========================================================
@@ -732,3 +768,30 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
+
+# ========================================================
+# SAYFA: KATILIMCI YÖNETİMİ
+# ========================================================
+elif page == "Katılımcı Yönetimi":
+    st.header("👥 Katılımcı Yönetimi")
+    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
+        with st.form("new_kat"):
+            c1, c2 = st.columns(2)
+            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
+            src = st.text_input("Kaynak (Opsiyonel)")
+            if st.form_submit_button("Ekle"):
+                if ad:
+                    try: 
+                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
+                        st.toast("Eklendi")
+                    except: st.error("Hata")
+    
+    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    df = pd.DataFrame(res.data)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
+        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
+            st.rerun()
