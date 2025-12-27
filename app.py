@@ -22,7 +22,7 @@ except ImportError:
     st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter evds")
     st.stop()
 
-# EVDS Kütüphanesi (Opsiyonel)
+# EVDS Kütüphanesi
 try:
     import evds
 except ImportError:
@@ -38,7 +38,7 @@ try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
-    # EVDS Anahtarı (Varsa alır, yoksa None)
+    # EVDS API Anahtarı
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
     
     supabase: Client = create_client(url, key)
@@ -110,63 +110,58 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- GELİŞMİŞ GERÇEKLEŞEN VERİ YÖNETİCİSİ ---
+# --- GELİŞMİŞ GERÇEKLEŞEN VERİ YÖNETİCİSİ (CACHE & MANUAL FALLBACK) ---
 @st.cache_data(ttl=3600)
-def fetch_realized_data(api_key):
+def fetch_realized_dataframe(api_key, start_date_str="01-01-2024", end_date_str=None):
     """
-    EVDS'den veri çekmeye çalışır. Başarısız olursa veya API yoksa
-    MANUEL tanımlanmış verileri döndürür. Böylece grafikler hep çalışır.
+    EVDS'den verileri çeker ve Pandas DataFrame olarak döndürür.
+    API yoksa veya hata olursa manuel veriyi döndürür.
     """
+    if not end_date_str:
+        end_date_str = datetime.date.today().strftime("%d-%m-%Y")
+
+    # Manuel Veri Seti (Yedek)
+    manual_data = [
+        {'Tarih': '2024-01', 'PPK Faizi': 45.0, 'Aylık TÜFE': 6.70, 'Yıllık TÜFE': 64.86},
+        {'Tarih': '2024-02', 'PPK Faizi': 45.0, 'Aylık TÜFE': 4.53, 'Yıllık TÜFE': 67.07},
+        {'Tarih': '2024-03', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.16, 'Yıllık TÜFE': 68.50},
+        {'Tarih': '2024-04', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.18, 'Yıllık TÜFE': 69.80},
+        {'Tarih': '2024-05', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.37, 'Yıllık TÜFE': 75.45},
+        {'Tarih': '2024-06', 'PPK Faizi': 50.0, 'Aylık TÜFE': 1.64, 'Yıllık TÜFE': 71.60},
+        {'Tarih': '2024-07', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.23, 'Yıllık TÜFE': 61.78},
+        {'Tarih': '2024-08', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.47, 'Yıllık TÜFE': 51.97},
+        {'Tarih': '2024-09', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.97, 'Yıllık TÜFE': 49.38},
+        {'Tarih': '2024-10', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.88, 'Yıllık TÜFE': 48.58},
+        {'Tarih': '2024-11', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.24, 'Yıllık TÜFE': 47.09},
+    ]
     
-    # 1. MANUEL YEDEK VERİLER (API Çalışmazsa Bunlar Görünür)
-    # ppk: Politika Faizi, enf_ay: Aylık TÜFE, enf_yil: Yıllık TÜFE
-    manual_data = {
-        '2024-01': {'ppk': 45.0, 'enf_ay': 6.70, 'enf_yil': 64.86},
-        '2024-02': {'ppk': 45.0, 'enf_ay': 4.53, 'enf_yil': 67.07},
-        '2024-03': {'ppk': 50.0, 'enf_ay': 3.16, 'enf_yil': 68.50},
-        '2024-04': {'ppk': 50.0, 'enf_ay': 3.18, 'enf_yil': 69.80},
-        '2024-05': {'ppk': 50.0, 'enf_ay': 3.37, 'enf_yil': 75.45},
-        '2024-06': {'ppk': 50.0, 'enf_ay': 1.64, 'enf_yil': 71.60},
-        '2024-07': {'ppk': 50.0, 'enf_ay': 3.23, 'enf_yil': 61.78},
-        '2024-08': {'ppk': 50.0, 'enf_ay': 2.47, 'enf_yil': 51.97},
-        '2024-09': {'ppk': 50.0, 'enf_ay': 2.97, 'enf_yil': 49.38},
-        '2024-10': {'ppk': 50.0, 'enf_ay': 2.88, 'enf_yil': 48.58},
-        '2024-11': {'ppk': 50.0, 'enf_ay': 2.24, 'enf_yil': 47.09},
-        '2024-12': {'ppk': 50.0, 'enf_ay': 1.80, 'enf_yil': 45.00}, # Tahmini örnek
-    }
-
-    # API Yoksa manuel dön
-    if not api_key or not evds:
-        return manual_data
-
-    # API Varsa Çekmeyi Dene
-    try:
-        ev = evds.evdsAPI(api_key)
-        end_date = datetime.date.today().strftime("%d-%m-%Y")
-        # TCMB Series
-        data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate="01-01-2024", enddate=end_date)
-        
-        realized_dict = {}
-        for _, row in data.iterrows():
-            if pd.isna(row['Tarih']): continue
-            dt = pd.to_datetime(row['Tarih'])
-            donem_str = dt.strftime('%Y-%m')
+    # API Kontrolü
+    if api_key and evds:
+        try:
+            ev = evds.evdsAPI(api_key)
+            # TP.PT.POL : Politika Faizi
+            # TP.TUFE1YI.AY.O : Aylık TÜFE
+            # TP.TUFE1YI.YI.O : Yıllık TÜFE
+            data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate=start_date_str, enddate=end_date_str)
             
-            realized_dict[donem_str] = {
-                'ppk': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
-                'enf_ay': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
-                'enf_yil': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
-            }
-        
-        # API verisi boşsa yine manuel dön
-        if not realized_dict:
-            return manual_data
+            clean_rows = []
+            for _, row in data.iterrows():
+                if pd.isna(row['Tarih']): continue
+                dt = pd.to_datetime(row['Tarih'])
+                
+                clean_rows.append({
+                    'Tarih': dt.strftime('%Y-%m'),
+                    'PPK Faizi': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
+                    'Aylık TÜFE': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
+                    'Yıllık TÜFE': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
+                })
             
-        return realized_dict
+            if clean_rows:
+                return pd.DataFrame(clean_rows), "API"
+        except:
+            pass # Hata olursa manuele düş
 
-    except:
-        # Hata durumunda manuel veri
-        return manual_data
+    return pd.DataFrame(manual_data), "Manuel"
 
 # --- EXCEL MOTORU ---
 def create_excel_dashboard(df_source):
@@ -327,7 +322,7 @@ if not st.session_state['giris_yapildi']:
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("📊 Menü")
-    page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "📄 Rapor Oluştur", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
+    page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "📈 Piyasa Verileri (EVDS)", "📄 Rapor Oluştur", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
 
 def get_participant_selection():
     res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
@@ -433,9 +428,19 @@ elif page == "Dashboard":
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # GERÇEKLEŞEN VERİLERİ ÇEK
-        realized_data = fetch_realized_data(EVDS_API_KEY)
+        # GERÇEKLEŞEN VERİLERİ ÇEK (EVDS veya MANUEL)
+        realized_df, data_source = fetch_realized_dataframe(EVDS_API_KEY)
         
+        # Gerçekleşen veriyi dict formatına çevir (Hızlı erişim için)
+        realized_dict = {}
+        if not realized_df.empty:
+            for _, row in realized_df.iterrows():
+                realized_dict[row['Tarih']] = {
+                    'ppk': row['PPK Faizi'],
+                    'enf_ay': row['Aylık TÜFE'],
+                    'enf_yil': row['Yıllık TÜFE']
+                }
+
         df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         df_latest_raw = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df_latest = pd.merge(df_latest_raw, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
@@ -450,7 +455,7 @@ elif page == "Dashboard":
         c1, c2, c3 = st.columns(3)
         c1.metric("Toplam Katılımcı", df_latest['kullanici_adi'].nunique())
         c2.metric("Güncel Tahmin Sayısı", len(df_latest))
-        c3.metric("Son Güncelleme", df_latest['tahmin_tarihi'].max().strftime('%d.%m.%Y'))
+        c3.metric("Veri Kaynağı", data_source)
         st.markdown("---")
 
         with st.sidebar:
@@ -491,28 +496,28 @@ elif page == "Dashboard":
                 fig = px.line(chart_data, x=x_axis_col, y=y, color="gorunen_isim" if not is_single_user else "donem", markers=True, title=tit, hover_data=["hover_text"])
                 if tick_format: fig.update_xaxes(tickformat=tick_format)
                 
-                # SİYAH KALIN ÇİZGİ (GERÇEKLEŞME)
-                # Sadece "Hedef Dönem" modunda ve veri varsa çiz
-                if x_axis_mode.startswith("📅") and real_key and realized_data:
-                    real_df_data = []
-                    for d, vals in realized_data.items():
+                # GERÇEKLEŞEN ÇİZGİSİ
+                if x_axis_mode.startswith("📅") and real_key and realized_dict:
+                    real_df_list = []
+                    for d, vals in realized_dict.items():
                         if vals.get(real_key) is not None:
-                            real_df_data.append({'donem': d, 'deger': vals[real_key]})
+                            real_df_list.append({'donem': d, 'deger': vals[real_key]})
                     
-                    if real_df_data:
-                        real_df = pd.DataFrame(real_df_data).sort_values('donem')
-                        # Dönemleri grafiğe uydur
+                    if real_df_list:
+                        rdf = pd.DataFrame(real_df_list).sort_values('donem')
+                        # Filtrele (Grafik aralığına göre)
+                        # Bu kısım önemli: Geçmiş veriyi de gösterebilmek için filtreyi geniş tutabiliriz veya tam eşleştirebiliriz.
+                        # Şimdilik grafik aralığına girenleri alalım.
                         min_d = chart_data['donem'].min()
                         max_d = chart_data['donem'].max()
-                        real_df = real_df[(real_df['donem'] >= min_d) & (real_df['donem'] <= max_d)]
+                        # Eğer geçmiş veri de görünsün isterseniz aşağıdaki filtreyi kaldırabilirsiniz.
+                        rdf = rdf[(rdf['donem'] >= min_d) & (rdf['donem'] <= max_d)]
                         
-                        if not real_df.empty:
+                        if not rdf.empty:
                             fig.add_trace(go.Scatter(
-                                x=real_df['donem'], y=real_df['deger'],
-                                mode='lines+markers',
-                                name='GERÇEKLEŞEN',
-                                line=dict(color='black', width=4),
-                                marker=dict(size=8, color='black')
+                                x=rdf['donem'], y=rdf['deger'],
+                                mode='lines+markers', name='GERÇEKLEŞEN',
+                                line=dict(color='black', width=4), marker=dict(size=8, color='black')
                             ))
 
                 dfr = chart_data.dropna(subset=[min_c, max_c])
@@ -627,6 +632,27 @@ elif page == "🔥 Isı Haritası":
         st.dataframe(pivot_df.style.apply(highlight, axis=None).format("{:.2f}"), use_container_width=True, height=len(sel_users)*50+100)
         st.caption("🟡: İlk Veri / Değişim Yok | 🔴: Yükseliş | 🟢: Düşüş")
     else: st.info("Veri yok.")
+
+# ========================================================
+# SAYFA: PIYASA VERILERI (YENİ EKLENEN SAYFA)
+# ========================================================
+elif page == "📈 Piyasa Verileri (EVDS)":
+    st.header("📈 Gerçekleşen Piyasa Verileri")
+    st.info("TCMB EVDS veya tanımlı veri setinden alınan gerçekleşen enflasyon ve faiz oranları.")
+    
+    with st.sidebar:
+        st.markdown("### 📅 Tarih Aralığı")
+        sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
+        ed = st.date_input("Bitiş", datetime.date.today())
+        
+    df_evds, source = fetch_realized_dataframe(EVDS_API_KEY, sd.strftime("%d-%m-%Y"), ed.strftime("%d-%m-%Y"))
+    
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.dataframe(df_evds, use_container_width=True, height=500)
+    with c2:
+        st.metric("Veri Kaynağı", source)
+        st.download_button("📥 Excel Olarak İndir", to_excel(df_evds), "PiyasaVerileri.xlsx", type="primary")
 
 # ========================================================
 # SAYFA: RAPOR OLUŞTUR
