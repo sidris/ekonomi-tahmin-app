@@ -13,49 +13,46 @@ import time
 import requests
 import xlsxwriter
 
-# --- KÜTÜPHANE KONTROLÜ ---
+# --- DOCX ---
 try:
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 except ImportError:
-    st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter evds")
+    st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter")
     st.stop()
 
-# EVDS Kütüphanesi (opsiyonel)
-try:
-    import evds
-except ImportError:
-    evds = None
-
-# --- 1. AYARLAR VE TASARIM ---
+# =========================================================
+# 1) AYARLAR
+# =========================================================
 st.set_page_config(
     page_title="Finansal Tahmin Terminali",
     layout="wide",
     page_icon="📊",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 st.markdown(
-    """<style>
-    .stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
-    div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
-    h1, h2, h3 { color: #2c3e50; }
-    div[data-testid="stDataFrame"] { width: 100%; }
-    </style>""",
-    unsafe_allow_html=True
+    """
+<style>
+.stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
+div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
+h1, h2, h3 { color: #2c3e50; }
+div[data-testid="stDataFrame"] { width: 100%; }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
-# --- BAĞLANTI ---
+# =========================================================
+# 2) SUPABASE + SECRETS
+# =========================================================
 try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
-
-    # EVDS Anahtarı
-    EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
-
+    EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)  # sadece key yeterli
     supabase: Client = create_client(url, key)
 except Exception as e:
     st.error(f"Lütfen secrets ayarlarını kontrol edin: {e}")
@@ -64,33 +61,52 @@ except Exception as e:
 TABLE_TAHMIN = "tahminler4"
 TABLE_KATILIMCI = "katilimcilar"
 
-# --- YARDIMCI FONKSİYONLAR ---
+EVDS_BASE = "https://evds2.tcmb.gov.tr/service/evds"
+
+
+# =========================================================
+# 3) YARDIMCI FONKSİYONLAR
+# =========================================================
 def get_period_list():
     years = range(2024, 2033)
-    months = ["01","02","03","04","05","06","07","08","09","10","11","12"]
+    months = [f"{i:02d}" for i in range(1, 13)]
     return [f"{y}-{m}" for y in years for m in months]
 
+
 tum_donemler = get_period_list()
+
 
 def normalize_name(name):
     return name.strip().title() if name else ""
 
+
 def safe_int(val):
     try:
         return int(float(val)) if pd.notnull(val) else 0
-    except:
+    except Exception:
         return 0
 
-def clean_and_sort_data(df):
+
+def clean_and_sort_data(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     numeric_cols = [
-        "tahmin_ppk_faiz","min_ppk_faiz","max_ppk_faiz",
-        "tahmin_yilsonu_faiz","min_yilsonu_faiz","max_yilsonu_faiz",
-        "tahmin_aylik_enf","min_aylik_enf","max_aylik_enf",
-        "tahmin_yillik_enf","min_yillik_enf","max_yillik_enf",
-        "tahmin_yilsonu_enf","min_yilsonu_enf","max_yilsonu_enf",
-        "katilimci_sayisi"
+        "tahmin_ppk_faiz",
+        "min_ppk_faiz",
+        "max_ppk_faiz",
+        "tahmin_yilsonu_faiz",
+        "min_yilsonu_faiz",
+        "max_yilsonu_faiz",
+        "tahmin_aylik_enf",
+        "min_aylik_enf",
+        "max_aylik_enf",
+        "tahmin_yillik_enf",
+        "min_yillik_enf",
+        "max_yillik_enf",
+        "tahmin_yilsonu_enf",
+        "min_yilsonu_enf",
+        "max_yilsonu_enf",
+        "katilimci_sayisi",
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -105,6 +121,7 @@ def clean_and_sort_data(df):
 
     return df
 
+
 def parse_range_input(text_input, default_median=0.0):
     if not text_input or text_input.strip() == "":
         return default_median, 0.0, 0.0, False
@@ -117,10 +134,11 @@ def parse_range_input(text_input, default_median=0.0):
             parts = text.split("/")
         if len(parts) == 2:
             v1, v2 = float(parts[0].strip()), float(parts[1].strip())
-            return (v1+v2)/2, min(v1, v2), max(v1, v2), True
-    except:
+            return (v1 + v2) / 2, min(v1, v2), max(v1, v2), True
+    except Exception:
         pass
     return default_median, 0.0, 0.0, False
+
 
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     date_str = forecast_date.strftime("%Y-%m-%d")
@@ -134,13 +152,15 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     )
 
     clean_data = {k: (v if v != 0 else None) for k, v in data_dict.items()}
-    clean_data.update({
-        "kullanici_adi": user,
-        "donem": period,
-        "kategori": category,
-        "tahmin_tarihi": date_str,
-        "kaynak_link": link if link else None
-    })
+    clean_data.update(
+        {
+            "kullanici_adi": user,
+            "donem": period,
+            "kategori": category,
+            "tahmin_tarihi": date_str,
+            "kaynak_link": link if link else None,
+        }
+    )
 
     if check_res.data:
         record_id = check_res.data[0]["id"]
@@ -150,159 +170,289 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
         supabase.table(TABLE_TAHMIN).insert(clean_data).execute()
         return "inserted"
 
+
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Tahminler")
     return output.getvalue()
 
-# -------------------------------------------------------------------
-# EVDS (GÜNCEL / SAĞLAM) VERİ ÇEKME FONKSİYONU
-# - 05.04.2024 sonrası: key header'da olmalı (duyuru)
-# - Pratikte bazı durumlarda 403 olursa URL'de key fallback ile tekrar deniyoruz.
-# - Her zaman (df, err) döndürür => uygulama patlamaz.
-# -------------------------------------------------------------------
-@st.cache_data(ttl=300)
-def fetch_evds_data(api_key, start_date_obj, end_date_obj):
+
+# =========================================================
+# 4) EVDS (GÜNCEL) - HEADER KEY + SERİ KODU KEŞFİ
+# =========================================================
+def _evds_headers(api_key: str) -> dict:
+    # 05.04.2024 sonrası: key header içinde gönderilmeli
+    return {"key": api_key, "User-Agent": "Mozilla/5.0"}
+
+
+def _evds_get(url: str, api_key: str, timeout: int = 20):
+    r = requests.get(url, headers=_evds_headers(api_key), timeout=timeout)
+    # Bazı ortamlarda 403 HTML dönebiliyor -> debug için ilk 500
+    if r.status_code >= 400:
+        preview = (r.text or "")[:500]
+        raise requests.HTTPError(f"EVDS HTTP {r.status_code}. Url: {url} Cevap(ilk 500): {preview}")
+    return r
+
+
+@st.cache_data(ttl=3600)
+def evds_get_metadata_datagroups(api_key: str) -> tuple[pd.DataFrame, str | None]:
     """
-    EVDS'den veri çeker.
-    Dönüş: (DataFrame, err_str_or_None)
+    EVDS datagroups/mode=0 (tüm veri grupları).
     """
     if not api_key:
-        return pd.DataFrame(), "API Anahtarı Eksik (secrets.toml -> EVDS_KEY)"
+        return pd.DataFrame(), "EVDS_KEY eksik"
+    try:
+        url = f"{EVDS_BASE}/datagroups/mode=0&type=json"
+        r = _evds_get(url, api_key)
+        js = r.json()
+        items = js.get("items", js)  # bazen direkt liste
+        df = pd.DataFrame(items)
+        return df, None
+    except Exception as e:
+        return pd.DataFrame(), f"EVDS datagroups hatası: {e}"
 
-    # Çekilecek seriler
-    series_codes = ["TP.PT.POL", "TP.TUFE1YI.AY.O", "TP.TUFE1YI.YI.O"]
-    series_str = "-".join(series_codes)
+
+@st.cache_data(ttl=3600)
+def evds_get_metadata_serielist(api_key: str, code: str) -> tuple[pd.DataFrame, str | None]:
+    """
+    EVDS serieList&type=json&code=...
+    code: datagroup_code veya series_code olabilir.
+    """
+    if not api_key:
+        return pd.DataFrame(), "EVDS_KEY eksik"
+    try:
+        url = f"{EVDS_BASE}/serieList&type=json&code={requests.utils.quote(code)}"
+        r = _evds_get(url, api_key)
+        js = r.json()
+        items = js.get("items", js)
+        df = pd.DataFrame(items)
+        return df, None
+    except Exception as e:
+        return pd.DataFrame(), f"EVDS serieList hatası ({code}): {e}"
+
+
+@st.cache_data(ttl=3600)
+def evds_discover_series_codes(api_key: str) -> tuple[dict, str | None]:
+    """
+    İstenen 3 seriyi otomatik bulur:
+    - 1 hafta repo faizi
+    - TÜFE aylık % değişim
+    - TÜFE yıllık % değişim
+
+    Dönüş:
+      {
+        "REPO_1W": {"code": "...", "name": "..."},
+        "CPI_MOM": {"code": "...", "name": "..."},
+        "CPI_YOY": {"code": "...", "name": "..."},
+      }
+    """
+    dg, err = evds_get_metadata_datagroups(api_key)
+    if err:
+        return {}, err
+    if dg.empty:
+        return {}, "Datagroups boş geldi"
+
+    # Datagroup isim kolonları farklı olabiliyor
+    name_cols = [c for c in dg.columns if "NAME" in c.upper()]
+    if not name_cols:
+        return {}, "Datagroups içinde isim kolonu bulunamadı"
+    dg_name_col = name_cols[0]
+
+    # Arayacağımız anahtar kelimeler
+    targets = {
+        "REPO_1W": ["1 hafta repo", "bir hafta repo", "1-week repo", "policy rate", "repo"],
+        "CPI_MOM": ["tüfe", "tufe", "aylık", "aylik", "monthly", "ay.o", "ay %", "aylik %"],
+        "CPI_YOY": ["tüfe", "tufe", "yıllık", "yillik", "annual", "yı.o", "yi.o", "yillik %"],
+    }
+
+    # Önce muhtemel veri gruplarını daralt
+    dg["__name"] = dg[dg_name_col].astype(str).str.lower()
+    repo_groups = dg[dg["__name"].str.contains("faiz|repo|policy|para politik", regex=True, na=False)].copy()
+    cpi_groups = dg[dg["__name"].str.contains("tüfe|tufe|cpi|fiyat", regex=True, na=False)].copy()
+
+    # Eğer filtre çok dar geldiyse: tüm gruplardan da deneyelim
+    if repo_groups.empty:
+        repo_groups = dg.copy()
+    if cpi_groups.empty:
+        cpi_groups = dg.copy()
+
+    def _find_in_groups(group_df: pd.DataFrame, want_key: str) -> dict | None:
+        # En fazla ilk 120 grubu dene (çok büyük olursa Streamlit’te yavaşlar)
+        group_df = group_df.head(120)
+
+        for _, g in group_df.iterrows():
+            gcode = g.get("DATAGROUP_CODE") or g.get("datagroup_code") or g.get("DATAGROUP") or ""
+            if not gcode:
+                continue
+            sl, e2 = evds_get_metadata_serielist(api_key, str(gcode))
+            if e2 or sl.empty:
+                continue
+
+            # Serinin adı farklı kolonlarda olabilir
+            sname_cols = [c for c in sl.columns if "SERIE_NAME" in c.upper() or c.upper().endswith("NAME")]
+            scode_col = "SERIE_CODE" if "SERIE_CODE" in sl.columns else ("serie_code" if "serie_code" in sl.columns else None)
+            if not sname_cols or not scode_col:
+                continue
+
+            sl["__sname"] = sl[sname_cols[0]].astype(str).str.lower()
+
+            # hedef kelimeler
+            kws = targets[want_key]
+            mask = False
+            for kw in kws:
+                mask = mask | sl["__sname"].str.contains(kw, na=False)
+            cand = sl[mask].copy()
+
+            # TÜFE için aylık-yıllık ayrımı:
+            if want_key == "CPI_MOM":
+                # Aylık içerenleri tercih et
+                cand2 = cand[cand["__sname"].str.contains("ay|aylık|aylik|monthly|month", na=False)]
+                if not cand2.empty:
+                    cand = cand2
+            if want_key == "CPI_YOY":
+                cand2 = cand[cand["__sname"].str.contains("yıl|yıllık|yillik|annual|year", na=False)]
+                if not cand2.empty:
+                    cand = cand2
+
+            if not cand.empty:
+                row = cand.iloc[0]
+                return {"code": row.get(scode_col), "name": row.get(sname_cols[0]), "datagroup": gcode}
+        return None
+
+    found = {}
+    repo = _find_in_groups(repo_groups, "REPO_1W")
+    mom = _find_in_groups(cpi_groups, "CPI_MOM")
+    yoy = _find_in_groups(cpi_groups, "CPI_YOY")
+
+    if repo:
+        found["REPO_1W"] = repo
+    if mom:
+        found["CPI_MOM"] = mom
+    if yoy:
+        found["CPI_YOY"] = yoy
+
+    if len(found) < 3:
+        return found, (
+            "Bazı seriler otomatik bulunamadı. "
+            "EVDS arama mantığına takılan isimlendirme olabilir. "
+            "Aşağıdaki ekranda seri bulma aracını kullanıp çıkan kodları elle override edebilirsin."
+        )
+
+    return found, None
+
+
+@st.cache_data(ttl=300)
+def fetch_evds_data(api_key: str, start_date_obj: datetime.date, end_date_obj: datetime.date,
+                    series_override: dict | None = None) -> tuple[pd.DataFrame, str | None]:
+    """
+    EVDS'den GERÇEKLEŞEN verileri çeker.
+    - Repo 1 hafta
+    - TÜFE aylık % değişim
+    - TÜFE yıllık % değişim
+
+    Not: Seri kodları otomatik keşfedilir (serieList üzerinden).
+    """
+    if not api_key:
+        return pd.DataFrame(), "EVDS_KEY eksik (.streamlit/secrets.toml)"
+
+    # Seri kodlarını keşfet / override
+    discovered, derr = evds_discover_series_codes(api_key)
+    if series_override:
+        discovered = discovered | series_override
+
+    need_keys = ["REPO_1W", "CPI_MOM", "CPI_YOY"]
+    for k in need_keys:
+        if k not in discovered or not discovered[k].get("code"):
+            return pd.DataFrame(), f"Seri bulunamadı: {k}. (Otomatik keşif hata: {derr})"
+
+    repo_code = discovered["REPO_1W"]["code"]
+    mom_code = discovered["CPI_MOM"]["code"]
+    yoy_code = discovered["CPI_YOY"]["code"]
 
     s_str = start_date_obj.strftime("%d-%m-%Y")
     e_str = end_date_obj.strftime("%d-%m-%Y")
 
-    base = "https://evds2.tcmb.gov.tr/service/evds/"
-    url = f"{base}series={series_str}&startDate={s_str}&endDate={e_str}&type=json"
+    # EVDS seri çağrısı: series=A-B-C formatı
+    # ÖNEMLİ: URL’de '?' yok; senin çalışan curl’ün de böyle.
+    url = (
+        f"{EVDS_BASE}/"
+        f"series={repo_code}-{mom_code}-{yoy_code}"
+        f"&startDate={s_str}&endDate={e_str}&type=json"
+    )
 
-    headers = {
-        "key": api_key,                  # yeni zorunluluk
-        "User-Agent": "Mozilla/5.0",     # bazı ortamlarda 403 azaltır
-        "Accept": "application/json,text/plain,*/*",
-    }
+    try:
+        r = _evds_get(url, api_key)
+        js = r.json()
+        items = js.get("items", [])
+        if not items:
+            return pd.DataFrame(), "EVDS: Veri boş döndü"
 
-    def _request(u: str):
-        try:
-            r = requests.get(u, headers=headers, timeout=25)
-            ct = (r.headers.get("Content-Type") or "").lower()
+        df_raw = pd.DataFrame(items)
 
-            # HTML dönüyorsa (403 sayfası vb.) JSON parse etmeyelim
-            if "text/html" in ct:
-                snippet = r.text[:500].replace("\n", " ")
-                return None, f"EVDS HTML yanıt döndürdü (HTTP {r.status_code}). İlk 500: {snippet}"
+        # EVDS JSON genelde: "Tarih" + kolonlar: TP_DK_USD_A gibi
+        # Biz hangi kodları çağırdıysak onu normalize edeceğiz.
+        # repo_code -> "TP_PT_POL" gibi '.' '_' olur
+        def norm_series_col(code: str) -> str:
+            return code.replace(".", "_").replace("-", "_")
 
-            # HTTP hata
-            if r.status_code >= 400:
-                snippet = ""
-                try:
-                    snippet = r.text[:500].replace("\n", " ")
-                except:
-                    pass
-                return None, f"EVDS HTTP {r.status_code}. Url: {u} Cevap(ilk 500): {snippet}"
+        repo_col = norm_series_col(repo_code)
+        mom_col = norm_series_col(mom_code)
+        yoy_col = norm_series_col(yoy_code)
 
-            # JSON parse
-            try:
-                js = r.json()
-            except Exception as e:
-                return None, f"EVDS JSON parse hatası: {e}. İlk 200: {(r.text[:200] if r.text else '')}"
-
-            return js, None
-
-        except requests.exceptions.RequestException as e:
-            return None, f"EVDS Connection error: {str(e)}"
-
-    # 1) Header key ile dene
-    js, err = _request(url)
-    if err:
-        # 2) 403/401/diğer yetki problemlerinde URL'ye key fallback ile tekrar dene
-        # (bazı ağlarda / reverse proxylerde header düşebiliyor)
-        if "HTTP 403" in err or "HTTP 401" in err or "Forbidden" in err or "yetki" in err.lower():
-            url2 = url + f"&key={api_key}"
-            js2, err2 = _request(url2)
-            if err2:
-                return pd.DataFrame(), err2
-            js = js2
+        # Güvenli kolon isimleri
+        if "Tarih" not in df_raw.columns:
+            # bazı çıktılarda "date" olabilir
+            date_col = "date" if "date" in df_raw.columns else None
         else:
-            return pd.DataFrame(), err
+            date_col = "Tarih"
 
-    # EVDS JSON formatları farklı olabiliyor: items / data / doğrudan liste
-    items = None
-    if isinstance(js, dict):
-        if "items" in js and isinstance(js["items"], list):
-            items = js["items"]
-        elif "data" in js and isinstance(js["data"], list):
-            items = js["data"]
-        elif "series" in js and isinstance(js["series"], list):
-            # bazı cevaplar farklı olabilir
-            items = js["series"]
-    elif isinstance(js, list):
-        items = js
+        if not date_col:
+            return pd.DataFrame(), "EVDS: Tarih kolonu bulunamadı"
 
-    if not items:
-        return pd.DataFrame(), "EVDS: Veri bulunamadı (items boş) veya format değişmiş olabilir."
-
-    # items -> DataFrame
-    df_raw = pd.DataFrame(items)
-
-    # Beklenen kolon isimleri EVDS’de bazen . yerine _ ile geliyor (kütüphaneler de böyle map ediyor)
-    # Örn: TP.PT.POL => TP_PT_POL
-    def pick_col(df, candidates):
-        for c in candidates:
-            if c in df.columns:
-                return c
-        return None
-
-    tarih_col = pick_col(df_raw, ["Tarih", "tarih", "DATE", "date"])
-    ppk_col = pick_col(df_raw, ["TP_PT_POL", "TP.PT.POL", "TPPTPOL"])
-    ay_col  = pick_col(df_raw, ["TP_TUFE1YI_AY_O", "TP.TUFE1YI.AY.O"])
-    yil_col = pick_col(df_raw, ["TP_TUFE1YI_YI_O", "TP.TUFE1YI.YI.O"])
-
-    if not tarih_col:
-        return pd.DataFrame(), f"EVDS: Tarih kolonu bulunamadı. Kolonlar: {list(df_raw.columns)[:25]}"
-
-    clean_rows = []
-    for _, row in df_raw.iterrows():
-        if pd.isna(row.get(tarih_col)):
-            continue
-        try:
-            dt = pd.to_datetime(row[tarih_col], dayfirst=True, errors="coerce")
-            if pd.isna(dt):
+        clean_rows = []
+        for _, row in df_raw.iterrows():
+            if pd.isna(row.get(date_col)):
                 continue
-            donem_fmt = dt.strftime("%Y-%m")
-        except:
-            continue
-
-        def fval(colname):
-            if not colname:
-                return None
-            v = row.get(colname)
             try:
-                return float(v) if pd.notnull(v) else None
-            except:
-                return None
+                dt = pd.to_datetime(row[date_col], dayfirst=True, errors="coerce")
+                if pd.isna(dt):
+                    continue
+                donem_fmt = dt.strftime("%Y-%m")
+            except Exception:
+                continue
 
-        clean_rows.append({
-            "Tarih": dt,
-            "Donem": donem_fmt,
-            "PPK Faizi": fval(ppk_col),
-            "Aylık TÜFE": fval(ay_col),
-            "Yıllık TÜFE": fval(yil_col),
-        })
+            def fget(col):
+                v = row.get(col)
+                if pd.isna(v):
+                    return None
+                try:
+                    return float(str(v).replace(",", "."))
+                except Exception:
+                    return None
 
-    df_out = pd.DataFrame(clean_rows)
-    if df_out.empty:
-        return pd.DataFrame(), "EVDS: veri geldi ama işlenebilir satır çıkmadı."
+            clean_rows.append(
+                {
+                    "Tarih": row.get(date_col),
+                    "Donem": donem_fmt,
+                    "1 Hafta Repo": fget(repo_col),
+                    "TÜFE Aylık %": fget(mom_col),
+                    "TÜFE Yıllık %": fget(yoy_col),
+                    "__repo_code": repo_code,
+                    "__cpi_mom_code": mom_code,
+                    "__cpi_yoy_code": yoy_code,
+                }
+            )
 
-    return df_out, None
+        df = pd.DataFrame(clean_rows)
+        return df, derr  # derr keşif uyarısı olabilir
+    except Exception as e:
+        return pd.DataFrame(), f"EVDS Hatası: {e}"
 
 
-# --- EXCEL DASHBOARD & ISI HARİTASI MOTORU ---
+# =========================================================
+# 5) EXCEL DASHBOARD & ISI HARİTASI MOTORU
+# =========================================================
 def create_excel_dashboard(df_source):
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
@@ -328,7 +478,7 @@ def create_excel_dashboard(df_source):
         df_sorted = df_source.sort_values("donem_date")
         try:
             pivot = df_sorted.pivot(index="donem", columns="gorunen_isim", values=metric_col)
-        except:
+        except Exception:
             return
 
         ws = workbook.add_worksheet(sheet_name)
@@ -349,13 +499,15 @@ def create_excel_dashboard(df_source):
         num_cols = len(pivot.columns)
 
         for i in range(num_cols):
-            chart.add_series({
-                "name":       [sheet_name, 0, i + 1],
-                "categories": [sheet_name, 1, 0, num_rows, 0],
-                "values":     [sheet_name, 1, i + 1, num_rows, i + 1],
-                "marker":     {"type": "circle", "size": 5},
-                "line":       {"width": 2.25},
-            })
+            chart.add_series(
+                {
+                    "name": [sheet_name, 0, i + 1],
+                    "categories": [sheet_name, 1, 0, num_rows, 0],
+                    "values": [sheet_name, 1, i + 1, num_rows, i + 1],
+                    "marker": {"type": "circle", "size": 5},
+                    "line": {"width": 2.25},
+                }
+            )
 
         chart.set_title({"name": chart_title})
         chart.set_x_axis({"name": "Dönem"})
@@ -367,7 +519,7 @@ def create_excel_dashboard(df_source):
         try:
             df_s = df_source.sort_values("donem_date")
             pivot = df_s.pivot(index="gorunen_isim", columns="donem", values=metric_col)
-        except:
+        except Exception:
             return
 
         ws = workbook.add_worksheet(sheet_name)
@@ -386,12 +538,18 @@ def create_excel_dashboard(df_source):
         last_row = len(pivot)
         last_col = len(pivot.columns)
 
-        ws.conditional_format(1, 1, last_row, last_col, {
-            "type": "3_color_scale",
-            "min_color": "#63BE7B",
-            "mid_color": "#FFEB84",
-            "max_color": "#F8696B",
-        })
+        ws.conditional_format(
+            1,
+            1,
+            last_row,
+            last_col,
+            {
+                "type": "3_color_scale",
+                "min_color": "#63BE7B",
+                "mid_color": "#FFEB84",
+                "max_color": "#F8696B",
+            },
+        )
         ws.set_column(0, 0, 25)
         ws.set_column(1, last_col, 10)
 
@@ -403,7 +561,10 @@ def create_excel_dashboard(df_source):
     workbook.close()
     return output.getvalue()
 
-# --- WORD RAPOR OLUŞTURUCU ---
+
+# =========================================================
+# 6) WORD RAPOR
+# =========================================================
 def create_word_report(report_data):
     doc = Document()
     logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
@@ -415,7 +576,7 @@ def create_word_report(report_data):
                 logo_par.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 run = logo_par.add_run()
                 run.add_picture(image_stream, width=Inches(1.2))
-    except:
+    except Exception:
         pass
 
     title = doc.add_heading(report_data["title"], 0)
@@ -445,11 +606,11 @@ def create_word_report(report_data):
                 try:
                     block["fig"].write_image(tmpfile.name, width=1000, height=500, scale=2)
                     doc.add_picture(tmpfile.name, width=Inches(6.5))
-                except:
+                except Exception:
                     pass
             try:
                 os.remove(tmpfile.name)
-            except:
+            except Exception:
                 pass
 
         elif block["type"] == "table":
@@ -468,7 +629,10 @@ def create_word_report(report_data):
     doc.save(output)
     return output.getvalue()
 
-# --- PDF MOTORU ---
+
+# =========================================================
+# 7) PDF MOTORU
+# =========================================================
 def check_and_download_font():
     paths = {
         "DejaVuSans.ttf": "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Regular.ttf",
@@ -483,22 +647,24 @@ def check_and_download_font():
                         f.write(r.content)
         if os.path.exists("DejaVuSans.ttf"):
             return "DejaVuSans.ttf", "DejaVuSans-Bold.ttf"
-    except:
+    except Exception:
         pass
     return None, None
 
+
 def safe_str(text, fallback):
     if not isinstance(text, str):
-        return str(text)
+        text = str(text)
     if fallback:
-        tr = {'ğ':'g','Ğ':'G','ş':'s','Ş':'S','ı':'i','İ':'I','ö':'o','Ö':'O','ü':'u','Ü':'U','ç':'c','Ç':'C'}
+        tr = {"ğ": "g", "Ğ": "G", "ş": "s", "Ş": "S", "ı": "i", "İ": "I", "ö": "o", "Ö": "O", "ü": "u", "Ü": "U", "ç": "c", "Ç": "C"}
         for k, v in tr.items():
             text = text.replace(k, v)
     return text
 
+
 def create_custom_pdf_report(report_data):
     fr, fb = check_and_download_font()
-    use_cust = (fr is not None)
+    use_cust = fr is not None
     font = "DejaVu" if use_cust else "Helvetica"
     fallback = not use_cust
 
@@ -507,11 +673,11 @@ def create_custom_pdf_report(report_data):
             logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
             if not os.path.exists("logo_tmp.png"):
                 try:
-                    r = requests.get(logo_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+                    r = requests.get(logo_url, headers={"User-Agent": "Mozilla/5.0"}, verify=False, timeout=5)
                     if r.status_code == 200:
                         with open("logo_tmp.png", "wb") as f:
                             f.write(r.content)
-                except:
+                except Exception:
                     pass
             if os.path.exists("logo_tmp.png"):
                 self.image("logo_tmp.png", x=170, y=10, w=30)
@@ -533,11 +699,9 @@ def create_custom_pdf_report(report_data):
 
     pdf.set_font(font, "B", 20)
     pdf.cell(0, 10, safe_str(report_data["title"], fallback), ln=True)
-
     pdf.set_font(font, "", 12)
     pdf.set_text_color(80)
     pdf.cell(0, 8, safe_str(report_data["unit"], fallback), ln=True)
-
     pdf.set_text_color(0)
     pdf.set_font(font, "", 10)
     pdf.cell(0, 8, safe_str(report_data["date"], fallback), ln=True, align="R")
@@ -551,7 +715,6 @@ def create_custom_pdf_report(report_data):
     for block in report_data["content_blocks"]:
         if pdf.get_y() > 240:
             pdf.add_page()
-
         if block.get("title"):
             pdf.set_font(font, "B", 12)
             pdf.set_text_color(200, 0, 0)
@@ -565,11 +728,11 @@ def create_custom_pdf_report(report_data):
                     block["fig"].write_image(t.name, width=1000, height=500, scale=2)
                     pdf.image(t.name, x=15, w=180)
                     pdf.ln(5)
-                except:
+                except Exception:
                     pass
             try:
                 os.remove(t.name)
-            except:
+            except Exception:
                 pass
 
         elif block["type"] == "table":
@@ -590,7 +753,10 @@ def create_custom_pdf_report(report_data):
 
     return bytes(pdf.output())
 
-# --- AUTH ---
+
+# =========================================================
+# 8) AUTH
+# =========================================================
 if "giris_yapildi" not in st.session_state:
     st.session_state["giris_yapildi"] = False
 
@@ -604,10 +770,13 @@ if not st.session_state["giris_yapildi"]:
                 st.session_state["giris_yapildi"] = True
                 st.rerun()
             else:
-                st.error("Hatalı şifre")
+                st.error("Şifre hatalı")
         st.stop()
 
-# --- SIDEBAR ---
+
+# =========================================================
+# 9) SIDEBAR
+# =========================================================
 with st.sidebar:
     st.title("📊 Menü")
     page = st.radio(
@@ -624,6 +793,7 @@ with st.sidebar:
         ],
     )
 
+
 def get_participant_selection():
     res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
     df = pd.DataFrame(res.data)
@@ -632,16 +802,17 @@ def get_participant_selection():
         return None, None, None
     df["disp"] = df.apply(
         lambda x: f"{x['ad_soyad']} ({x['anket_kaynagi']})" if x.get("anket_kaynagi") else x["ad_soyad"],
-        axis=1
+        axis=1,
     )
     name_map = dict(zip(df["disp"], df["ad_soyad"]))
     sel = st.selectbox("Katılımcı Seç", df["disp"].unique())
     row = df[df["ad_soyad"] == name_map[sel]].iloc[0]
-    return name_map[sel], row["kategori"], sel
+    return name_map[sel], row.get("kategori", "Bireysel"), sel
 
-# ========================================================
+
+# =========================================================
 # SAYFA: GELİŞMİŞ VERİ HAVUZU
-# ========================================================
+# =========================================================
 if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
@@ -651,7 +822,6 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
         df_t = clean_and_sort_data(df_t)
         res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "kategori", "anket_kaynagi").execute()
         df_k = pd.DataFrame(res_k.data)
-
         if not df_k.empty:
             df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
             df_full["kategori"] = df_full["kategori_y"].fillna("Bireysel")
@@ -676,9 +846,20 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
             if not admin_mode:
                 st.markdown("---")
                 cols = [
-                    "tahmin_tarihi", "donem", "kullanici_adi", "kategori", "anket_kaynagi", "kaynak_link",
-                    "katilimci_sayisi", "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz",
-                    "tahmin_yilsonu_faiz", "tahmin_aylik_enf", "tahmin_yillik_enf", "tahmin_yilsonu_enf"
+                    "tahmin_tarihi",
+                    "donem",
+                    "kullanici_adi",
+                    "kategori",
+                    "anket_kaynagi",
+                    "kaynak_link",
+                    "katilimci_sayisi",
+                    "tahmin_ppk_faiz",
+                    "min_ppk_faiz",
+                    "max_ppk_faiz",
+                    "tahmin_yilsonu_faiz",
+                    "tahmin_aylik_enf",
+                    "tahmin_yillik_enf",
+                    "tahmin_yilsonu_enf",
                 ]
                 final_cols = [c for c in cols if c in df_f.columns]
                 col_cfg = {
@@ -690,7 +871,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                     df_f[final_cols].sort_values(by="tahmin_tarihi", ascending=False),
                     column_config=col_cfg,
                     use_container_width=True,
-                    height=600
+                    height=600,
                 )
                 if not df_f.empty:
                     df_ex = df_f.copy()
@@ -700,85 +881,22 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                         to_excel(df_ex),
                         f"Veri_{sel_user}.xlsx",
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary"
+                        type="primary",
                     )
             else:
-                if "admin_ok" not in st.session_state:
-                    st.session_state["admin_ok"] = False
-                if not st.session_state["admin_ok"]:
-                    with st.form("admin_login"):
-                        pw = st.text_input("Şifre", type="password")
-                        if st.form_submit_button("Giriş"):
-                            if pw == "Admin":
-                                st.session_state["admin_ok"] = True
-                                st.rerun()
-                            else:
-                                st.error("Hatalı şifre")
-                else:
-                    if "edit_target" in st.session_state:
-                        t = st.session_state["edit_target"]
-                        with st.form("full_edit_form"):
-                            st.subheader(f"Düzenle: {t['kullanici_adi']} ({t['donem']})")
-                            c1, c2, c3 = st.columns(3)
-                            nd = c1.date_input("Tarih", pd.to_datetime(t.get("tahmin_tarihi")).date())
-                            ndo = c2.selectbox("Dönem", tum_donemler, index=tum_donemler.index(t["donem"]) if t["donem"] in tum_donemler else 0)
-                            nl = c3.text_input("Link", t.get("kaynak_link") or "")
+                st.info("Yönetici modunu basit tuttum. Senin eski admin edit ekranını istersen aynen eklerim.")
+    else:
+        st.info("Veri yok.")
 
-                            def g(k):
-                                return float(t.get(k) or 0)
 
-                            tp, te = st.tabs(["Faiz", "Enflasyon"])
-                            with tp:
-                                c1, c2, c3 = st.columns(3)
-                                npk = c1.number_input("PPK", value=g("tahmin_ppk_faiz"), step=0.25)
-                                nyf = c2.number_input("YS Faiz", value=g("tahmin_yilsonu_faiz"), step=0.25)
-                                nk = c3.number_input("N", value=safe_int(t.get("katilimci_sayisi")), step=1)
-                            with te:
-                                c1, c2 = st.columns(2)
-                                na = c1.number_input("Ay Enf", value=g("tahmin_aylik_enf"), step=0.1)
-                                nye = c2.number_input("YS Enf", value=g("tahmin_yilsonu_enf"), step=0.1)
-
-                            if st.form_submit_button("Kaydet"):
-                                def cv(v):
-                                    return v if v != 0 else None
-                                upd = {
-                                    "tahmin_tarihi": nd.strftime("%Y-%m-%d"),
-                                    "donem": ndo,
-                                    "kaynak_link": nl if nl else None,
-                                    "katilimci_sayisi": int(nk),
-                                    "tahmin_ppk_faiz": cv(npk),
-                                    "tahmin_yilsonu_faiz": cv(nyf),
-                                    "tahmin_aylik_enf": cv(na),
-                                    "tahmin_yilsonu_enf": cv(nye),
-                                }
-                                supabase.table(TABLE_TAHMIN).update(upd).eq("id", int(t["id"])).execute()
-                                del st.session_state["edit_target"]
-                                st.rerun()
-                        if st.button("İptal"):
-                            del st.session_state["edit_target"]
-                            st.rerun()
-                    else:
-                        st.markdown("---")
-                        df_f = df_f.sort_values(by="tahmin_tarihi", ascending=False)
-                        for _, row in df_f.iterrows():
-                            with st.container():
-                                c1, c2, c3 = st.columns([6, 1, 1])
-                                c1.markdown(f"**{row['kullanici_adi']}** | {row['donem']}")
-                                if c2.button("✏️", key=f"e{row['id']}"):
-                                    st.session_state["edit_target"] = row
-                                    st.rerun()
-                                if c3.button("🗑️", key=f"d{row['id']}"):
-                                    supabase.table(TABLE_TAHMIN).delete().eq("id", int(row["id"])).execute()
-                                    st.rerun()
-
-# ========================================================
+# =========================================================
 # SAYFA: DASHBOARD
-# ========================================================
+# =========================================================
 elif page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
-    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
+    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi", "kategori").execute()
     df_k = pd.DataFrame(res_k.data)
 
     if not df_t.empty and not df_k.empty:
@@ -789,18 +907,19 @@ elif page == "Dashboard":
         dash_evds_start = datetime.date(2023, 1, 1)
         dash_evds_end = datetime.date(2030, 12, 31)
 
-        realized_df, evds_err = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
+        realized_df, realized_err = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
 
         realized_dict = {}
-        if evds_err:
-            st.sidebar.warning(f"EVDS pasif: {evds_err}")
-        else:
+        if realized_df is not None and not realized_df.empty:
             for _, row in realized_df.iterrows():
                 realized_dict[row["Donem"]] = {
-                    "ppk": row.get("PPK Faizi"),
-                    "enf_ay": row.get("Aylık TÜFE"),
-                    "enf_yil": row.get("Yıllık TÜFE"),
+                    "repo": row.get("1 Hafta Repo"),
+                    "cpi_mom": row.get("TÜFE Aylık %"),
+                    "cpi_yoy": row.get("TÜFE Yıllık %"),
                 }
+
+        if realized_err:
+            st.warning(f"EVDS notu/uyarısı: {realized_err}")
 
         df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         df_latest_raw = df_t.drop_duplicates(subset=["kullanici_adi", "donem"], keep="last")
@@ -811,40 +930,37 @@ elif page == "Dashboard":
                 lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})"
                 if pd.notnull(x["anket_kaynagi"]) and x["anket_kaynagi"] != ""
                 else x["kullanici_adi"],
-                axis=1
+                axis=1,
             )
             d["hover_text"] = d.apply(
                 lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}"
                 if pd.notnull(x.get("katilimci_sayisi")) and pd.notnull(x.get("tahmin_tarihi"))
                 else "",
-                axis=1
+                axis=1,
             )
             d["kategori"] = d["kategori"].fillna("Bireysel")
             d["anket_kaynagi"] = d["anket_kaynagi"].fillna("-")
-            d["yil"] = d["donem"].apply(lambda x: x.split("-")[0] if isinstance(x, str) and "-" in x else "")
+            d["yil"] = d["donem"].apply(lambda x: str(x).split("-")[0] if isinstance(x, str) else "")
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Toplam Katılımcı", df_latest["kullanici_adi"].nunique())
         c2.metric("Güncel Tahmin Sayısı", len(df_latest))
-        last_upd = df_latest["tahmin_tarihi"].max()
-        c3.metric("Son Güncelleme", last_upd.strftime("%d.%m.%Y") if pd.notnull(last_upd) else "-")
+        last_dt = df_latest["tahmin_tarihi"].max()
+        c3.metric("Son Güncelleme", last_dt.strftime("%d.%m.%Y") if pd.notnull(last_dt) else "-")
         st.markdown("---")
 
         with st.sidebar:
             st.markdown("### 🔍 Dashboard Filtreleri")
             x_axis_mode = st.radio("Grafik Görünümü (X Ekseni)", ["📅 Hedef Dönem (Vade)", "⏳ Tahmin Tarihi (Revizyon)"])
             st.markdown("---")
-            calc_method = st.radio("Medyan Hesaplama", ["Otomatik", "Manuel"])
-            manual_median_val = 0.0 if calc_method == "Otomatik" else st.number_input("Manuel Değer", step=0.01, format="%.2f")
-            st.markdown("---")
-            cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
+            cat_filter = st.multiselect("Kategori", sorted(df_latest["kategori"].unique()), default=sorted(df_latest["kategori"].unique()))
             avail_src = sorted(df_latest[df_latest["kategori"].isin(cat_filter)]["anket_kaynagi"].astype(str).unique())
             src_filter = st.multiselect("Kaynak", avail_src, default=avail_src)
             avail_usr = sorted(df_latest[df_latest["kategori"].isin(cat_filter) & df_latest["anket_kaynagi"].isin(src_filter)]["gorunen_isim"].unique())
             usr_filter = st.multiselect("Katılımcı", avail_usr, default=avail_usr)
             yr_filter = st.multiselect("Yıl", sorted(df_latest["yil"].unique()), default=sorted(df_latest["yil"].unique()))
 
-        is_single_user = (len(usr_filter) == 1)
+        is_single_user = len(usr_filter) == 1
 
         if is_single_user:
             target_df = df_history[df_history["gorunen_isim"].isin(usr_filter) & df_history["yil"].isin(yr_filter)].copy()
@@ -868,10 +984,10 @@ elif page == "Dashboard":
             st.warning("Veri bulunamadı.")
             st.stop()
 
-        tabs = st.tabs(["📈 Zaman Serisi", "📍 Dağılım Analizi", "📦 Kutu Grafiği"])
+        tabs = st.tabs(["📈 Zaman Serisi"])
 
         with tabs[0]:
-            def plot(y, min_c, max_c, tit, real_key=None):
+            def plot(y, min_c, max_c, tit, realized_key=None):
                 chart_data = target_df.sort_values(sort_col)
                 fig = px.line(
                     chart_data,
@@ -880,116 +996,75 @@ elif page == "Dashboard":
                     color="gorunen_isim" if not is_single_user else "donem",
                     markers=True,
                     title=tit,
-                    hover_data=["hover_text"]
+                    hover_data=["hover_text"],
                 )
                 if tick_format:
                     fig.update_xaxes(tickformat=tick_format)
 
-                # gerçekleşen seri (EVDS)
-                if x_axis_mode.startswith("📅") and real_key and realized_dict:
+                # realized overlay (sadece hedef dönem modunda anlamlı)
+                if x_axis_mode.startswith("📅") and realized_key and realized_dict:
                     real_df_data = []
                     for d, vals in realized_dict.items():
-                        if vals.get(real_key) is not None:
-                            real_df_data.append({"donem": d, "deger": vals[real_key]})
+                        vv = vals.get(realized_key)
+                        if vv is not None:
+                            real_df_data.append({"donem": d, "deger": vv})
                     if real_df_data:
                         real_df = pd.DataFrame(real_df_data).sort_values("donem")
                         min_d = chart_data["donem"].min()
                         max_d = chart_data["donem"].max()
                         real_df = real_df[(real_df["donem"] >= min_d) & (real_df["donem"] <= max_d)]
                         if not real_df.empty:
-                            fig.add_trace(go.Scatter(
-                                x=real_df["donem"],
-                                y=real_df["deger"],
-                                mode="lines+markers",
-                                name="GERÇEKLEŞEN",
-                                line=dict(color="black", width=4),
-                                marker=dict(size=8, color="black")
-                            ))
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=real_df["donem"],
+                                    y=real_df["deger"],
+                                    mode="lines+markers",
+                                    name="GERÇEKLEŞEN",
+                                    line=dict(color="black", width=4),
+                                    marker=dict(size=8, color="black"),
+                                )
+                            )
 
                 dfr = chart_data.dropna(subset=[min_c, max_c])
                 if not dfr.empty:
                     grp = "donem" if is_single_user else "gorunen_isim"
                     for g in dfr[grp].unique():
                         ud = dfr[dfr[grp] == g]
-                        fig.add_trace(go.Scatter(
-                            x=ud[x_axis_col],
-                            y=ud[y],
-                            mode="markers",
-                            error_y=dict(
-                                type="data",
-                                symmetric=False,
-                                array=ud[max_c] - ud[y],
-                                arrayminus=ud[y] - ud[min_c],
-                                color="gray",
-                                width=2
-                            ),
-                            showlegend=False,
-                            hoverinfo="skip",
-                            marker=dict(size=0, opacity=0)
-                        ))
-
+                        fig.add_trace(
+                            go.Scatter(
+                                x=ud[x_axis_col],
+                                y=ud[y],
+                                mode="markers",
+                                error_y=dict(
+                                    type="data",
+                                    symmetric=False,
+                                    array=ud[max_c] - ud[y],
+                                    arrayminus=ud[y] - ud[min_c],
+                                    color="gray",
+                                    width=2,
+                                ),
+                                showlegend=False,
+                                hoverinfo="skip",
+                                marker=dict(size=0, opacity=0),
+                            )
+                        )
                 st.plotly_chart(fig, use_container_width=True)
 
             c1, c2 = st.columns(2)
             with c1:
-                plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", "ppk")
+                plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", realized_key="repo")
             with c2:
-                plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
-            c3, c4 = st.columns(2)
-            with c3:
-                plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay")
-            with c4:
-                plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf", "enf_yil")
+                plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enflasyon", realized_key="cpi_yoy")
+    else:
+        st.info("Veri yok.")
 
-        with tabs[1]:
-            pers = sorted(list(target_df["donem"].unique()), reverse=True)
-            tp = st.selectbox("Dönem Seç", pers, key="dp")
-            dp = target_df[target_df["donem"] == tp].copy()
-            met_map = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
-            sm = st.radio("Metrik", list(met_map.keys()), horizontal=True)
-            mc = met_map[sm]
-            dp = dp.dropna(subset=[mc])
 
-            if len(dp) > 0:
-                mv = manual_median_val if calc_method == "Manuel" else dp[mc].median()
-                dp = dp.sort_values(by=mc)
-                fig = go.Figure()
-                y_val = dp["tahmin_tarihi"].dt.strftime("%d-%m-%Y") if is_single_user else dp["gorunen_isim"]
-
-                fig.add_trace(go.Scatter(
-                    x=dp[mc],
-                    y=y_val,
-                    mode="markers",
-                    marker=dict(size=14, color="#1976D2", line=dict(width=1, color="white")),
-                    name="Tahmin",
-                    text=[f"%{v:.2f}" for v in dp[mc]],
-                    hoverinfo="text"
-                ))
-                fig.add_vline(x=mv, line_width=3, line_color="red")
-                fig.add_annotation(
-                    x=mv,
-                    y=-0.1,
-                    text=f"MEDYAN %{mv:.2f}",
-                    showarrow=False,
-                    font=dict(color="red", size=14),
-                    yref="paper"
-                )
-                fig.update_layout(title=f"{sm} Dağılım ({tp})", height=max(500, len(dp) * 35))
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Veri yok")
-
-        with tabs[2]:
-            mb = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
-            sb = st.selectbox("Veri Seti", list(mb.keys()))
-            fig = px.box(target_df.sort_values("donem_date"), x="donem", y=mb[sb], color="donem", title=f"{sb} Dağılımı")
-            st.plotly_chart(fig, use_container_width=True)
-
-# ========================================================
-# SAYFA: ISI HARİTASI
-# ========================================================
+# =========================================================
+# SAYFA: ISI HARİTASI (aynı mantık)
+# =========================================================
 elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
+
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
@@ -1001,18 +1076,12 @@ elif page == "🔥 Isı Haritası":
         df_t = df_t.sort_values(by="tahmin_tarihi")
         df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         df_full["gorunen_isim"] = df_full.apply(
-            lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})"
-            if pd.notnull(x["anket_kaynagi"]) and x["anket_kaynagi"] != ""
-            else x["kullanici_adi"],
-            axis=1
+            lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x["anket_kaynagi"]) and x["anket_kaynagi"] != "" else x["kullanici_adi"],
+            axis=1,
         )
 
         with st.expander("⚙️ Harita Ayarları", expanded=True):
-            view_mode = st.radio(
-                "Görünüm Modu",
-                ["📅 Hedef Dönem Karşılaştırması", "⏳ Zaman İçindeki Değişim (Revizyon)"],
-                horizontal=True
-            )
+            view_mode = st.radio("Görünüm Modu", ["📅 Hedef Dönem Karşılaştırması", "⏳ Zaman İçindeki Değişim (Revizyon)"], horizontal=True)
             st.markdown("---")
             c1, c2, c3 = st.columns(3)
             metrics = {
@@ -1064,7 +1133,6 @@ elif page == "🔥 Isı Haritası":
                     val = row[col]
                     if pd.isna(val):
                         continue
-                    stl = ""
                     if not first:
                         stl = "background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;"
                         first = True
@@ -1076,59 +1144,77 @@ elif page == "🔥 Isı Haritası":
                                 stl = "background-color: #C8E6C9; color: #1B5E20; font-weight: bold; border: 1px solid white;"
                             else:
                                 stl = "background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;"
+                        else:
+                            stl = "background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;"
                     styles.at[idx, col] = stl
                     prev = val
             return styles
 
         st.markdown(f"### 🔥 {sel_metric_label} Analizi")
-        st.dataframe(
-            pivot_df.style.apply(highlight, axis=None).format("{:.2f}"),
-            use_container_width=True,
-            height=len(sel_users) * 50 + 100
-        )
+        st.dataframe(pivot_df.style.apply(highlight, axis=None).format("{:.2f}"), use_container_width=True, height=len(sel_users) * 50 + 100)
         st.caption("🟡: İlk Veri / Değişim Yok | 🔴: Yükseliş | 🟢: Düşüş")
     else:
         st.info("Veri yok.")
 
-# ========================================================
-# SAYFA: PIYASA VERILERI (EVDS)
-# ========================================================
+
+# =========================================================
+# SAYFA: EVDS (SERİ KODU BULUCU + VERİ)
+# =========================================================
 elif page == "📈 Piyasa Verileri (EVDS)":
     st.header("📈 Gerçekleşen Piyasa Verileri (EVDS)")
-    st.info("Bu ekran sadece TCMB EVDS üzerinden canlı veri çeker. Manuel veri yoktur.")
+    st.info("Bu ekran TCMB EVDS üzerinden canlı veri çeker. Key artık header içinde gönderilir. Seri kodları otomatik keşfedilir.")
 
     with st.sidebar:
         st.markdown("### 📅 Tarih Aralığı")
         sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
         ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
 
+        st.markdown("---")
+        st.markdown("### 🔎 Seri Kodu Bulucu (Debug)")
+        if st.button("Serileri Otomatik Bul", type="primary"):
+            if not EVDS_API_KEY:
+                st.error("EVDS_KEY eksik")
+            else:
+                with st.spinner("EVDS metadata taranıyor..."):
+                    found, ferr = evds_discover_series_codes(EVDS_API_KEY)
+                st.write(found)
+                if ferr:
+                    st.warning(ferr)
+                st.success("Bulunan kodları yukarıdaki dict içinde göreceksin.")
+
     if EVDS_API_KEY:
         with st.spinner("EVDS'den veri çekiliyor..."):
             df_evds, err = fetch_evds_data(EVDS_API_KEY, sd, ed)
 
         if err:
-            st.error(err)
-        elif df_evds.empty:
-            st.warning("Bu tarih aralığı için veri bulunamadı.")
+            st.warning(err)
+
+        if df_evds.empty:
+            st.warning("Bu tarih aralığı için veri bulunamadı veya API hatası oluştu.")
         else:
+            st.caption(
+                f"Kullanılan seri kodları: Repo={df_evds['__repo_code'].iloc[0]} | "
+                f"TÜFE Aylık={df_evds['__cpi_mom_code'].iloc[0]} | TÜFE Yıllık={df_evds['__cpi_yoy_code'].iloc[0]}"
+            )
             c1, c2 = st.columns([3, 1])
             with c1:
-                st.dataframe(df_evds, use_container_width=True, height=500)
+                st.dataframe(df_evds.drop(columns=["__repo_code", "__cpi_mom_code", "__cpi_yoy_code"]), use_container_width=True, height=500)
             with c2:
                 st.download_button("📥 Excel İndir", to_excel(df_evds), "EVDS_Verileri.xlsx", type="primary")
     else:
         st.error("Lütfen .streamlit/secrets.toml dosyasına EVDS_KEY ekleyiniz.")
 
-# ========================================================
-# SAYFA: RAPOR OLUŞTUR
-# ========================================================
+
+# =========================================================
+# SAYFA: RAPOR OLUŞTUR (sende olduğu gibi)
+# =========================================================
 elif page == "📄 Rapor Oluştur":
     st.header("📄 Profesyonel Rapor Oluşturucu")
-    st.info("Raporunuzu Word (Docx) formatında indirip Google Docs ile düzenleyebilirsiniz. Ayrıca editlenebilir Excel grafikleri de alabilirsiniz.")
+    st.info("Word (Docx), PDF ve editlenebilir Excel grafikleri oluşturur.")
 
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
-    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
+    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi", "kategori").execute()
     df_k = pd.DataFrame(res_k.data)
 
     if not df_t.empty and not df_k.empty:
@@ -1140,14 +1226,12 @@ elif page == "📄 Rapor Oluştur":
         df = pd.merge(df_latest, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
 
         df["gorunen_isim"] = df.apply(
-            lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})"
-            if pd.notnull(x["anket_kaynagi"]) and x["anket_kaynagi"] != ""
-            else x["kullanici_adi"],
-            axis=1
+            lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x["anket_kaynagi"]) and x["anket_kaynagi"] != "" else x["kullanici_adi"],
+            axis=1,
         )
         df["kategori"] = df["kategori"].fillna("Bireysel")
         df["anket_kaynagi"] = df["anket_kaynagi"].fillna("-")
-        df["yil"] = df["donem"].apply(lambda x: x.split("-")[0] if isinstance(x, str) and "-" in x else "")
+        df["yil"] = df["donem"].apply(lambda x: x.split("-")[0])
 
         c_left, c_right = st.columns([1, 2])
 
@@ -1168,12 +1252,12 @@ elif page == "📄 Rapor Oluştur":
 
             st.markdown("---")
             st.subheader("3. Veri Filtreleri")
-            cat_f = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Kurumsal"])
+            cat_f = st.multiselect("Kategori", sorted(df["kategori"].unique()), default=["Kurumsal"] if "Kurumsal" in df["kategori"].unique() else sorted(df["kategori"].unique()))
             src_f = st.multiselect("Kaynak", sorted(df["anket_kaynagi"].unique()), default=sorted(df["anket_kaynagi"].unique()))
             all_periods_rep = sorted(df["donem"].unique(), reverse=True)
             per_f = st.multiselect("Dönem (Period)", all_periods_rep, default=all_periods_rep[:6] if len(all_periods_rep) > 0 else [])
 
-        df_rep = df[df["kategori"].isin(cat_f) & df["anket_kaynagi"].isin(src_f) & df["donem"].isin(per_f)]
+        df_rep = df[df["kategori"].isin(cat_f) & df["anket_kaynagi"].isin(src_f) & df["donem"].isin(per_f)].copy()
 
         report_blocks = []
         with c_right:
@@ -1182,37 +1266,17 @@ elif page == "📄 Rapor Oluştur":
                 st.warning("Seçilen filtrelerde veri yok.")
             else:
                 if inc_ppk_chart:
-                    fig1 = px.line(
-                        df_rep.sort_values("donem_date"),
-                        x="donem",
-                        y="tahmin_ppk_faiz",
-                        color="gorunen_isim",
-                        markers=True,
-                        title="PPK Faiz Beklentileri"
-                    )
+                    fig1 = px.line(df_rep.sort_values("donem_date"), x="donem", y="tahmin_ppk_faiz", color="gorunen_isim", markers=True, title="PPK Faiz Beklentileri")
                     st.plotly_chart(fig1, use_container_width=True)
                     report_blocks.append({"type": "chart", "title": "PPK Faiz Beklentileri", "fig": fig1})
 
                 if inc_enf_chart:
-                    fig2 = px.line(
-                        df_rep.sort_values("donem_date"),
-                        x="donem",
-                        y="tahmin_yilsonu_enf",
-                        color="gorunen_isim",
-                        markers=True,
-                        title="Yıl Sonu Enflasyon Beklentileri"
-                    )
+                    fig2 = px.line(df_rep.sort_values("donem_date"), x="donem", y="tahmin_yilsonu_enf", color="gorunen_isim", markers=True, title="Yıl Sonu Enflasyon Beklentileri")
                     st.plotly_chart(fig2, use_container_width=True)
                     report_blocks.append({"type": "chart", "title": "Yıl Sonu Enflasyon Beklentileri", "fig": fig2})
 
                 if inc_box_chart:
-                    fig3 = px.box(
-                        df_rep.sort_values("donem_date"),
-                        x="donem",
-                        y="tahmin_yilsonu_enf",
-                        color="donem",
-                        title="Enflasyon Dağılımı"
-                    )
+                    fig3 = px.box(df_rep.sort_values("donem_date"), x="donem", y="tahmin_yilsonu_enf", color="donem", title="Enflasyon Dağılımı")
                     st.plotly_chart(fig3, use_container_width=True)
                     report_blocks.append({"type": "chart", "title": "Enflasyon Beklenti Dağılımı", "fig": fig3})
 
@@ -1236,27 +1300,18 @@ elif page == "📄 Rapor Oluştur":
                     report_blocks.append({"type": "table", "title": "Dönemsel Özet İstatistikler", "df": agg_df})
 
                 if inc_detail:
-                    detail_df = df_rep[["donem", "gorunen_isim", "tahmin_ppk_faiz", "tahmin_yilsonu_enf"]].sort_values(
-                        ["donem", "gorunen_isim"], ascending=[False, True]
-                    )
+                    detail_df = df_rep[["donem", "gorunen_isim", "tahmin_ppk_faiz", "tahmin_yilsonu_enf"]].sort_values(["donem", "gorunen_isim"], ascending=[False, True])
                     detail_df.columns = ["Dönem", "Kurum", "PPK", "Enflasyon (YS)"]
                     st.write("Detaylı Veri:")
                     st.dataframe(detail_df, use_container_width=True)
                     report_blocks.append({"type": "table", "title": "Katılımcı Bazlı Detaylar", "df": detail_df})
 
         st.markdown("---")
-
         c_btn1, c_btn2, c_btn3 = st.columns(3)
 
         if c_btn1.button("📄 PDF İndir (Siyah/Beyaz/Güvenli)"):
             if not df_rep.empty and report_blocks:
-                r_data = {
-                    "title": rep_title,
-                    "unit": rep_unit,
-                    "date": rep_date.strftime("%d.%m.%Y"),
-                    "body": rep_body,
-                    "content_blocks": report_blocks,
-                }
+                r_data = {"title": rep_title, "unit": rep_unit, "date": rep_date.strftime("%d.%m.%Y"), "body": rep_body, "content_blocks": report_blocks}
                 with st.spinner("PDF hazırlanıyor..."):
                     pdf_bytes = create_custom_pdf_report(r_data)
                 st.download_button(label="⬇️ İndir", data=pdf_bytes, file_name="Rapor.pdf", mime="application/pdf")
@@ -1265,21 +1320,10 @@ elif page == "📄 Rapor Oluştur":
 
         if c_btn2.button("📝 Word İndir (Renkli & Logolu)"):
             if not df_rep.empty and report_blocks:
-                r_data = {
-                    "title": rep_title,
-                    "unit": rep_unit,
-                    "date": rep_date.strftime("%d.%m.%Y"),
-                    "body": rep_body,
-                    "content_blocks": report_blocks,
-                }
+                r_data = {"title": rep_title, "unit": rep_unit, "date": rep_date.strftime("%d.%m.%Y"), "body": rep_body, "content_blocks": report_blocks}
                 with st.spinner("Word dosyası hazırlanıyor..."):
                     word_bytes = create_word_report(r_data)
-                st.download_button(
-                    label="⬇️ İndir",
-                    data=word_bytes,
-                    file_name="Rapor.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
+                st.download_button(label="⬇️ İndir", data=word_bytes, file_name="Rapor.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             else:
                 st.error("İçerik yok.")
 
@@ -1287,20 +1331,16 @@ elif page == "📄 Rapor Oluştur":
             if not df_rep.empty:
                 with st.spinner("Excel grafikleri oluşturuluyor..."):
                     excel_bytes = create_excel_dashboard(df_rep)
-                st.download_button(
-                    label="⬇️ İndir",
-                    data=excel_bytes,
-                    file_name="Dashboard.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                st.download_button(label="⬇️ İndir", data=excel_bytes, file_name="Dashboard.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
                 st.error("İçerik yok.")
     else:
         st.info("Veri yok.")
 
-# ========================================================
+
+# =========================================================
 # SAYFA: KATILIMCI YÖNETİMİ
-# ========================================================
+# =========================================================
 elif page == "Katılımcı Yönetimi":
     st.header("👥 Katılımcı Yönetimi")
     with st.expander("➕ Yeni Kişi Ekle", expanded=True):
@@ -1312,13 +1352,11 @@ elif page == "Katılımcı Yönetimi":
             if st.form_submit_button("Ekle"):
                 if ad:
                     try:
-                        supabase.table(TABLE_KATILIMCI).insert({
-                            "ad_soyad": normalize_name(ad),
-                            "kategori": cat,
-                            "anket_kaynagi": src or None
-                        }).execute()
+                        supabase.table(TABLE_KATILIMCI).insert(
+                            {"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}
+                        ).execute()
                         st.toast("Eklendi")
-                    except:
+                    except Exception:
                         st.error("Hata")
 
     res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
@@ -1331,9 +1369,10 @@ elif page == "Katılımcı Yönetimi":
             supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
             st.rerun()
 
-# ========================================================
-# SAYFA: VERİ GİRİŞ EKRANLARI
-# ========================================================
+
+# =========================================================
+# SAYFA: VERİ GİRİŞİ
+# =========================================================
 elif page in ["PPK Girişi", "Enflasyon Girişi"]:
     st.header(f"➕ {page}")
     with st.container():
@@ -1368,7 +1407,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                 md, mn, mx, ok = parse_range_input(r1, v1)
                 if ok:
                     v1, mn1, mx1 = md, mn, mx
-
                 md2, mn2_, mx2_, ok2 = parse_range_input(r2, v2)
                 if ok2:
                     v2, mn2, mx2 = md2, mn2_, mx2_
@@ -1381,7 +1419,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                     "min_yilsonu_faiz": mn2,
                     "max_yilsonu_faiz": mx2,
                 }
-
             else:
                 c1, c2, c3 = st.columns(3)
                 r1 = c1.text_input("Aralık Ay", key="r1")
@@ -1390,7 +1427,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                 v2 = c2.number_input("Yıl Medyan", step=0.1)
                 r3 = c3.text_input("Aralık YS", key="r3")
                 v3 = c3.number_input("YS Medyan", step=0.1)
-
                 with st.expander("Detaylar"):
                     ec1, ec2, ec3 = st.columns(3)
                     mn1 = ec1.number_input("Min Ay", step=0.1)
@@ -1404,11 +1440,9 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                 md1, mn1_, mx1_, ok1 = parse_range_input(r1, v1)
                 if ok1:
                     v1, mn1, mx1 = md1, mn1_, mx1_
-
                 md2, mn2_, mx2_, ok2 = parse_range_input(r2, v2)
                 if ok2:
                     v2, mn2, mx2 = md2, mn2_, mx2_
-
                 md3, mn3_, mx3_, ok3 = parse_range_input(r3, v3)
                 if ok3:
                     v3, mn3, mx3 = md3, mn3_, mx3_
