@@ -22,7 +22,7 @@ except ImportError:
     st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter evds")
     st.stop()
 
-# EVDS Kütüphanesi (Opsiyonel)
+# EVDS Kütüphanesi
 try:
     import evds
 except ImportError:
@@ -38,7 +38,7 @@ try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
-    # EVDS Anahtarı (Varsa alır, yoksa None)
+    # EVDS Anahtarı (Zorunlu)
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
     
     supabase: Client = create_client(url, key)
@@ -110,122 +110,55 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- VERİ YÖNETİCİSİ (EVDS/MANUEL) ---
-@st.cache_data(ttl=3600)
-def fetch_realized_data(api_key):
-    """Grafikler için dict formatında veri döner."""
-    # 2024 ve 2025 Tahmini Verileri (Yedek)
-    manual_data = {
-        '2024-01': {'ppk': 45.0, 'enf_ay': 6.70, 'enf_yil': 64.86},
-        '2024-02': {'ppk': 45.0, 'enf_ay': 4.53, 'enf_yil': 67.07},
-        '2024-03': {'ppk': 50.0, 'enf_ay': 3.16, 'enf_yil': 68.50},
-        '2024-04': {'ppk': 50.0, 'enf_ay': 3.18, 'enf_yil': 69.80},
-        '2024-05': {'ppk': 50.0, 'enf_ay': 3.37, 'enf_yil': 75.45},
-        '2024-06': {'ppk': 50.0, 'enf_ay': 1.64, 'enf_yil': 71.60},
-        '2024-07': {'ppk': 50.0, 'enf_ay': 3.23, 'enf_yil': 61.78},
-        '2024-08': {'ppk': 50.0, 'enf_ay': 2.47, 'enf_yil': 51.97},
-        '2024-09': {'ppk': 50.0, 'enf_ay': 2.97, 'enf_yil': 49.38},
-        '2024-10': {'ppk': 50.0, 'enf_ay': 2.88, 'enf_yil': 48.58},
-        '2024-11': {'ppk': 50.0, 'enf_ay': 2.24, 'enf_yil': 47.09},
-        '2024-12': {'ppk': 50.0, 'enf_ay': 1.80, 'enf_yil': 45.00},
-        # 2025 Örnek (Gelecek)
-        '2025-01': {'ppk': 47.5, 'enf_ay': 3.50, 'enf_yil': 42.00},
-        '2025-02': {'ppk': 45.0, 'enf_ay': 2.80, 'enf_yil': 39.00},
-        '2025-06': {'ppk': 40.0, 'enf_ay': 2.00, 'enf_yil': 32.00},
-        '2025-12': {'ppk': 35.0, 'enf_ay': 1.50, 'enf_yil': 25.00}
-    }
-    if not api_key or not evds: return manual_data
+# --- SADECE EVDS VERİ ÇEKME FONKSİYONU ---
+@st.cache_data(ttl=300) # 5 dk cache
+def fetch_evds_data(api_key, start_date_obj, end_date_obj):
+    """
+    Sadece EVDS'den veri çeker. Manuel veri yoktur.
+    """
+    if not api_key or not evds:
+        return pd.DataFrame()
+
     try:
         ev = evds.evdsAPI(api_key)
-        end_date = datetime.date.today().strftime("%d-%m-%Y")
-        data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate="01-01-2024", enddate=end_date)
-        realized_dict = {}
+        # Tarih formatı: DD-MM-YYYY
+        s_str = start_date_obj.strftime("%d-%m-%Y")
+        e_str = end_date_obj.strftime("%d-%m-%Y")
+        
+        # TP.PT.POL      : 1 Hafta Repo (Politika Faizi)
+        # TP.TUFE1YI.AY.O: TÜFE (Aylık % Değişim)
+        # TP.TUFE1YI.YI.O: TÜFE (Yıllık % Değişim)
+        series = ['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O']
+        
+        data = ev.get_data(series, startdate=s_str, enddate=e_str)
+        
+        # Veri temizleme ve formatlama
+        clean_rows = []
         for _, row in data.iterrows():
-            if pd.isna(row['Tarih']): continue
-            dt = pd.to_datetime(row['Tarih'])
-            donem_str = dt.strftime('%Y-%m')
-            realized_dict[donem_str] = {
-                'ppk': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
-                'enf_ay': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
-                'enf_yil': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
-            }
-        return realized_dict if realized_dict else manual_data
-    except: return manual_data
-
-@st.cache_data(ttl=3600)
-def fetch_realized_dataframe(api_key, start_date_obj, end_date_obj):
-    """
-    Tablo ekranı için DataFrame döner.
-    start_date_obj ve end_date_obj: datetime.date objeleri
-    """
-    
-    # Varsayılan Manuel Veri (2024 ve 2025 Dahil)
-    manual_data_list = [
-        {'Tarih': '2024-01', 'PPK Faizi': 45.0, 'Aylık TÜFE': 6.70, 'Yıllık TÜFE': 64.86},
-        {'Tarih': '2024-02', 'PPK Faizi': 45.0, 'Aylık TÜFE': 4.53, 'Yıllık TÜFE': 67.07},
-        {'Tarih': '2024-03', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.16, 'Yıllık TÜFE': 68.50},
-        {'Tarih': '2024-04', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.18, 'Yıllık TÜFE': 69.80},
-        {'Tarih': '2024-05', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.37, 'Yıllık TÜFE': 75.45},
-        {'Tarih': '2024-06', 'PPK Faizi': 50.0, 'Aylık TÜFE': 1.64, 'Yıllık TÜFE': 71.60},
-        {'Tarih': '2024-07', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.23, 'Yıllık TÜFE': 61.78},
-        {'Tarih': '2024-08', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.47, 'Yıllık TÜFE': 51.97},
-        {'Tarih': '2024-09', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.97, 'Yıllık TÜFE': 49.38},
-        {'Tarih': '2024-10', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.88, 'Yıllık TÜFE': 48.58},
-        {'Tarih': '2024-11', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.24, 'Yıllık TÜFE': 47.09},
-        {'Tarih': '2024-12', 'PPK Faizi': 50.0, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-01', 'PPK Faizi': 47.5, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-02', 'PPK Faizi': 45.0, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-03', 'PPK Faizi': 42.5, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-04', 'PPK Faizi': 42.5, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-05', 'PPK Faizi': 40.0, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-06', 'PPK Faizi': 40.0, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-07', 'PPK Faizi': 37.5, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-08', 'PPK Faizi': 37.5, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-09', 'PPK Faizi': 35.0, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-10', 'PPK Faizi': 35.0, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-11', 'PPK Faizi': 32.5, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-        {'Tarih': '2025-12', 'PPK Faizi': 30.0, 'Aylık TÜFE': None, 'Yıllık TÜFE': None},
-    ]
-    
-    df_result = pd.DataFrame(manual_data_list)
-    source = "Manuel Veri (Yedek)"
-
-    # API Varsa ve Çalışırsa Üzerine Yaz
-    if api_key and evds:
-        try:
-            ev = evds.evdsAPI(api_key)
-            # EVDS'den veri çekerken tarih aralığını geniş tutalım, filtrelemeyi sonra yaparız
-            data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate=start_date_obj.strftime("%d-%m-%Y"), enddate=end_date_obj.strftime("%d-%m-%Y"))
-            clean_rows = []
-            for _, row in data.iterrows():
-                if pd.isna(row['Tarih']): continue
+            if pd.isna(row.get('Tarih')): continue
+            
+            # Tarih formatını 'YYYY-MM' (Dönem) formatına çevir
+            try:
+                # EVDS bazen '2024-1' döner, bazen '01-01-2024'. Parser esnek olmalı.
                 dt = pd.to_datetime(row['Tarih'])
-                clean_rows.append({
-                    'Tarih': dt.strftime('%Y-%m'),
-                    'PPK Faizi': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
-                    'Aylık TÜFE': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
-                    'Yıllık TÜFE': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
-                })
-            if clean_rows:
-                df_result = pd.DataFrame(clean_rows)
-                source = "TCMB EVDS (Canlı)"
-        except:
-            pass # Hata durumunda manuel veri kalır
+                donem_fmt = dt.strftime('%Y-%m')
+            except:
+                continue
 
-    # TARİH FİLTRESİ (KRİTİK KISIM)
-    # DataFrame'deki 'Tarih' sütunu string (YYYY-MM). Bunu datetime objesine çevirip filtreleyeceğiz.
-    if not df_result.empty:
-        df_result['dt_temp'] = pd.to_datetime(df_result['Tarih'], format='%Y-%m')
-        
-        # Seçilen tarihlerin sadece Yıl ve Ay kısmına bakalım (Günün önemi yok)
-        start_period = pd.to_datetime(start_date_obj.strftime('%Y-%m-01'))
-        end_period = pd.to_datetime(end_date_obj.strftime('%Y-%m-28')) # Ay sonuna denk gelmesi için güvenli bir gün
-        
-        # Filtreleme
-        mask = (df_result['dt_temp'] >= start_period) & (df_result['dt_temp'] <= end_period)
-        df_result = df_result.loc[mask].drop(columns=['dt_temp'])
+            clean_rows.append({
+                'Tarih': row['Tarih'], # Orijinal tarih
+                'Donem': donem_fmt,    # Eşleştirme anahtarı
+                'PPK Faizi': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
+                'Aylık TÜFE': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
+                'Yıllık TÜFE': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
+            })
+            
+        return pd.DataFrame(clean_rows)
 
-    return df_result, source
+    except Exception as e:
+        # Hata durumunda boş dataframe dön (Manuel veri yok!)
+        st.error(f"EVDS Hatası: {e}")
+        return pd.DataFrame()
 
 # --- EXCEL DASHBOARD & ISI HARİTASI MOTORU ---
 def create_excel_dashboard(df_source):
@@ -535,6 +468,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                             nd = c1.date_input("Tarih", pd.to_datetime(t.get('tahmin_tarihi')).date())
                             ndo = c2.selectbox("Dönem", tum_donemler, index=tum_donemler.index(t['donem']) if t['donem'] in tum_donemler else 0)
                             nl = c3.text_input("Link", t.get('kaynak_link') or "")
+                            
                             def g(k): return float(t.get(k) or 0)
                             tp, te = st.tabs(["Faiz", "Enflasyon"])
                             with tp:
@@ -546,6 +480,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 c1, c2 = st.columns(2)
                                 na = c1.number_input("Ay Enf", value=g('tahmin_aylik_enf'), step=0.1)
                                 nye = c2.number_input("YS Enf", value=g('tahmin_yilsonu_enf'), step=0.1)
+                            
                             if st.form_submit_button("Kaydet"):
                                 def cv(v): return v if v!=0 else None
                                 upd = {"tahmin_tarihi": nd.strftime('%Y-%m-%d'), "donem": ndo, "kaynak_link": nl if nl else None, "katilimci_sayisi": int(nk), "tahmin_ppk_faiz": cv(npk), "tahmin_yilsonu_faiz": cv(nyf), "tahmin_aylik_enf": cv(na), "tahmin_yilsonu_enf": cv(nye)}
@@ -577,8 +512,22 @@ elif page == "Dashboard":
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        realized_data = fetch_realized_data(EVDS_API_KEY)
+        # Dashboard için geniş aralıkta EVDS verisi çek (2020-2030)
+        # Böylece grafiklerdeki tüm tarihler için veri hazır olur
+        dash_evds_start = datetime.date(2023, 1, 1)
+        dash_evds_end = datetime.date(2030, 12, 31)
+        realized_df, _ = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         
+        # Dict çevirimi
+        realized_dict = {}
+        if not realized_df.empty:
+            for _, row in realized_df.iterrows():
+                realized_dict[row['Donem']] = {
+                    'ppk': row['PPK Faizi'],
+                    'enf_ay': row['Aylık TÜFE'],
+                    'enf_yil': row['Yıllık TÜFE']
+                }
+
         df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         df_latest_raw = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df_latest = pd.merge(df_latest_raw, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
@@ -634,9 +583,9 @@ elif page == "Dashboard":
                 fig = px.line(chart_data, x=x_axis_col, y=y, color="gorunen_isim" if not is_single_user else "donem", markers=True, title=tit, hover_data=["hover_text"])
                 if tick_format: fig.update_xaxes(tickformat=tick_format)
                 
-                if x_axis_mode.startswith("📅") and real_key and realized_data:
+                if x_axis_mode.startswith("📅") and real_key and realized_dict:
                     real_df_data = []
-                    for d, vals in realized_data.items():
+                    for d, vals in realized_dict.items():
                         if vals.get(real_key) is not None:
                             real_df_data.append({'donem': d, 'deger': vals[real_key]})
                     
@@ -767,28 +716,28 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: PIYASA VERILERI (GELİŞMİŞ FİLTRELEME)
+# SAYFA: PIYASA VERILERI (GELİŞMİŞ FİLTRELEME & MANUEL EKSİK GİDERME)
 # ========================================================
 elif page == "📈 Piyasa Verileri (EVDS)":
     st.header("📈 Gerçekleşen Piyasa Verileri")
-    st.info("TCMB EVDS veya tanımlı veri setinden alınan gerçekleşen enflasyon ve faiz oranları.")
+    st.info("TCMB EVDS'den alınan gerçekleşen enflasyon ve faiz oranları.")
     
     with st.sidebar:
         st.markdown("### 📅 Tarih Aralığı")
-        # 2025 Tarihleri için geniş aralık
+        # Varsayılan Bitiş Tarihi: Bugün değil, 2025 Sonuna kadar açık olsun ki gelecek verileri de seçebilsin
         sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
         ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
         
-    df_evds, source = fetch_realized_dataframe(EVDS_API_KEY, sd, ed)
+    df_evds = fetch_evds_data(EVDS_API_KEY, sd, ed)
     
     c1, c2 = st.columns([3, 1])
     with c1:
         if df_evds.empty:
-            st.warning("Bu tarih aralığında veri bulunamadı.")
+            st.warning("Bu tarih aralığında veri bulunamadı veya API anahtarı eksik.")
         else:
             st.dataframe(df_evds, use_container_width=True, height=500)
     with c2:
-        st.metric("Veri Kaynağı", source)
+        st.metric("Veri Kaynağı", "TCMB EVDS (Canlı)")
         if not df_evds.empty:
             st.download_button("📥 Excel Olarak İndir", to_excel(df_evds), "PiyasaVerileri.xlsx", type="primary")
 
