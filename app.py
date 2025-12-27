@@ -138,7 +138,6 @@ def parse_range_input(text_input, default_median=0.0):
 
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     date_str = forecast_date.strftime("%Y-%m-%d")
-
     check_res = (
         supabase.table(TABLE_TAHMIN)
         .select("id")
@@ -177,9 +176,10 @@ def to_excel(df):
 
 # --------------------------------------------------------
 # EVDS (TCMB) - SADECE REQUESTS + HEADER KEY
+# (NOT: Fonksiyon adı v2 -> eski cache/çakışma tamamen kırılır)
 # --------------------------------------------------------
 @st.cache_data(ttl=300)
-def fetch_evds_data(api_key, start_date_obj, end_date_obj):
+def fetch_evds_data_v2(api_key, start_date_obj, end_date_obj):
     """
     EVDS'den veri çeker.
     DÖNÜŞ: (DataFrame, hata_mesajı|None)
@@ -207,13 +207,13 @@ def fetch_evds_data(api_key, start_date_obj, end_date_obj):
     }
 
     try:
-        r = requests.get(base_url, params=params, headers=headers, timeout=20)
+        r = requests.get(base_url, params=params, headers=headers, timeout=25)
         r.raise_for_status()
         j = r.json()
 
         items = j.get("items") or []
         if not items:
-            return pd.DataFrame(), f"EVDS: Veri bulunamadı / cevap anahtarları: {list(j.keys())}"
+            return pd.DataFrame(), f"EVDS: Veri yok. Cevap keys: {list(j.keys())}"
 
         raw = pd.DataFrame(items)
 
@@ -248,13 +248,14 @@ def fetch_evds_data(api_key, start_date_obj, end_date_obj):
     except requests.exceptions.HTTPError as e:
         return pd.DataFrame(), f"EVDS HTTP Hatası: {e} (status={getattr(r, 'status_code', None)})"
     except requests.exceptions.RequestException as e:
-        return pd.DataFrame(), f"EVDS Bağlantı Hatası: {e}"
+        return pd.DataFrame(), f"EVDS Bağlantı/HTTP Hatası: {e}"
     except Exception as e:
         return pd.DataFrame(), f"EVDS Parse Hatası: {e}"
 
 
 def evds_test_widget():
     st.markdown("#### 🧪 EVDS Bağlantı Testi")
+    st.caption("Buradaki Final URL mutlaka .../service/evds/?series=... formatında olmalı.")
     if st.button("EVDS Test Et"):
         if not EVDS_API_KEY:
             st.error("EVDS_KEY yok.")
@@ -266,7 +267,7 @@ def evds_test_widget():
                 test_url,
                 params=params,
                 headers={"key": EVDS_API_KEY, "User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-                timeout=20,
+                timeout=25,
             )
             st.write("Status:", r.status_code)
             st.write("Final URL:", r.url)
@@ -660,12 +661,10 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
-
     if not df_t.empty:
         df_t = clean_and_sort_data(df_t)
         res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "kategori", "anket_kaynagi").execute()
         df_k = pd.DataFrame(res_k.data)
-
         if not df_k.empty:
             df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
             df_full["kategori"] = df_full["kategori_y"].fillna("Bireysel")
@@ -734,7 +733,6 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
             else:
                 if "admin_ok" not in st.session_state:
                     st.session_state["admin_ok"] = False
-
                 if not st.session_state["admin_ok"]:
                     with st.form("admin_login"):
                         ap = st.text_input("Şifre", type="password")
@@ -813,10 +811,8 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
 # ========================================================
 elif page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
-
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
-
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi", "kategori").execute()
     df_k = pd.DataFrame(res_k.data)
 
@@ -828,9 +824,9 @@ elif page == "Dashboard":
         # EVDS gerçekleşen veriler (opsiyonel)
         realized_dict = {}
         dash_evds_start = datetime.date(2023, 1, 1)
-        dash_evds_end = datetime.date(2025, 12, 31)
+        dash_evds_end = datetime.date(2030, 12, 31)
 
-        realized_df, evds_err = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
+        realized_df, evds_err = fetch_evds_data_v2(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         if evds_err:
             st.sidebar.warning(f"EVDS: {evds_err}")
             realized_df = pd.DataFrame()
@@ -917,6 +913,7 @@ elif page == "Dashboard":
         tabs = st.tabs(["📈 Zaman Serisi", "📍 Dağılım Analizi", "📦 Kutu Grafiği"])
 
         with tabs[0]:
+
             def plot(y, min_c, max_c, tit, real_key=None):
                 chart_data = target_df.sort_values(sort_col)
                 fig = px.line(
@@ -931,7 +928,8 @@ elif page == "Dashboard":
                 if tick_format:
                     fig.update_xaxes(tickformat=tick_format)
 
-                if (not is_single_user) and real_key and realized_dict:
+                # Gerçekleşen sadece hedef dönem görünümünde ve data varsa
+                if (not is_single_user) and real_key and realized_dict and x_axis_mode.startswith("📅"):
                     real_df_data = []
                     for d, vals in realized_dict.items():
                         if vals.get(real_key) is not None:
@@ -1044,7 +1042,6 @@ elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
-
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
     df_k = pd.DataFrame(res_k.data)
 
@@ -1151,7 +1148,7 @@ elif page == "📈 Piyasa Verileri (EVDS)":
 
     if EVDS_API_KEY:
         with st.spinner("EVDS'den veri çekiliyor..."):
-            df_evds, err = fetch_evds_data(EVDS_API_KEY, sd, ed)
+            df_evds, err = fetch_evds_data_v2(EVDS_API_KEY, sd, ed)
 
         if err:
             st.warning(err)
@@ -1270,8 +1267,8 @@ elif page == "📄 Rapor Oluştur":
                     report_blocks.append({"type": "table", "title": "Katılımcı Bazlı Detaylar", "df": detail_df})
 
         st.markdown("---")
-
         c_btn1, c_btn2, c_btn3 = st.columns(3)
+
         if c_btn1.button("📄 PDF İndir (Siyah/Beyaz/Güvenli)"):
             if not df_rep.empty and report_blocks:
                 r_data = {"title": rep_title, "unit": rep_unit, "date": rep_date.strftime("%d.%m.%Y"), "body": rep_body, "content_blocks": report_blocks}
