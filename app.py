@@ -22,7 +22,7 @@ except ImportError:
     st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter evds")
     st.stop()
 
-# EVDS Kütüphanesi
+# EVDS Kütüphanesi (Opsiyonel)
 try:
     import evds
 except ImportError:
@@ -38,7 +38,7 @@ try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
-    # EVDS API Anahtarı
+    # EVDS Anahtarı (Varsa alır, yoksa None)
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
     
     supabase: Client = create_client(url, key)
@@ -110,18 +110,49 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- GELİŞMİŞ GERÇEKLEŞEN VERİ YÖNETİCİSİ (CACHE & MANUAL FALLBACK) ---
+# --- VERİ YÖNETİCİSİ (EVDS/MANUEL) ---
+@st.cache_data(ttl=3600)
+def fetch_realized_data(api_key):
+    """Grafikler için dict formatında veri döner."""
+    manual_data = {
+        '2024-01': {'ppk': 45.0, 'enf_ay': 6.70, 'enf_yil': 64.86},
+        '2024-02': {'ppk': 45.0, 'enf_ay': 4.53, 'enf_yil': 67.07},
+        '2024-03': {'ppk': 50.0, 'enf_ay': 3.16, 'enf_yil': 68.50},
+        '2024-04': {'ppk': 50.0, 'enf_ay': 3.18, 'enf_yil': 69.80},
+        '2024-05': {'ppk': 50.0, 'enf_ay': 3.37, 'enf_yil': 75.45},
+        '2024-06': {'ppk': 50.0, 'enf_ay': 1.64, 'enf_yil': 71.60},
+        '2024-07': {'ppk': 50.0, 'enf_ay': 3.23, 'enf_yil': 61.78},
+        '2024-08': {'ppk': 50.0, 'enf_ay': 2.47, 'enf_yil': 51.97},
+        '2024-09': {'ppk': 50.0, 'enf_ay': 2.97, 'enf_yil': 49.38},
+        '2024-10': {'ppk': 50.0, 'enf_ay': 2.88, 'enf_yil': 48.58},
+        '2024-11': {'ppk': 50.0, 'enf_ay': 2.24, 'enf_yil': 47.09},
+        '2024-12': {'ppk': 50.0, 'enf_ay': 1.80, 'enf_yil': 45.00}
+    }
+    if not api_key or not evds: return manual_data
+    try:
+        ev = evds.evdsAPI(api_key)
+        end_date = datetime.date.today().strftime("%d-%m-%Y")
+        data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate="01-01-2024", enddate=end_date)
+        realized_dict = {}
+        for _, row in data.iterrows():
+            if pd.isna(row['Tarih']): continue
+            dt = pd.to_datetime(row['Tarih'])
+            donem_str = dt.strftime('%Y-%m')
+            realized_dict[donem_str] = {
+                'ppk': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
+                'enf_ay': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
+                'enf_yil': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
+            }
+        return realized_dict if realized_dict else manual_data
+    except: return manual_data
+
 @st.cache_data(ttl=3600)
 def fetch_realized_dataframe(api_key, start_date_str="01-01-2024", end_date_str=None):
-    """
-    EVDS'den verileri çeker ve Pandas DataFrame olarak döndürür.
-    API yoksa veya hata olursa manuel veriyi döndürür.
-    """
-    if not end_date_str:
-        end_date_str = datetime.date.today().strftime("%d-%m-%Y")
-
-    # Manuel Veri Seti (Yedek)
-    manual_data = [
+    """Tablo ekranı için DataFrame döner."""
+    if not end_date_str: end_date_str = datetime.date.today().strftime("%d-%m-%Y")
+    
+    # Varsayılan Manuel Veri (DataFrame formatında)
+    manual_data = pd.DataFrame([
         {'Tarih': '2024-01', 'PPK Faizi': 45.0, 'Aylık TÜFE': 6.70, 'Yıllık TÜFE': 64.86},
         {'Tarih': '2024-02', 'PPK Faizi': 45.0, 'Aylık TÜFE': 4.53, 'Yıllık TÜFE': 67.07},
         {'Tarih': '2024-03', 'PPK Faizi': 50.0, 'Aylık TÜFE': 3.16, 'Yıllık TÜFE': 68.50},
@@ -132,91 +163,126 @@ def fetch_realized_dataframe(api_key, start_date_str="01-01-2024", end_date_str=
         {'Tarih': '2024-08', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.47, 'Yıllık TÜFE': 51.97},
         {'Tarih': '2024-09', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.97, 'Yıllık TÜFE': 49.38},
         {'Tarih': '2024-10', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.88, 'Yıllık TÜFE': 48.58},
-        {'Tarih': '2024-11', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.24, 'Yıllık TÜFE': 47.09},
-    ]
-    
-    # API Kontrolü
+        {'Tarih': '2024-11', 'PPK Faizi': 50.0, 'Aylık TÜFE': 2.24, 'Yıllık TÜFE': 47.09}
+    ])
+
     if api_key and evds:
         try:
             ev = evds.evdsAPI(api_key)
-            # TP.PT.POL : Politika Faizi
-            # TP.TUFE1YI.AY.O : Aylık TÜFE
-            # TP.TUFE1YI.YI.O : Yıllık TÜFE
             data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate=start_date_str, enddate=end_date_str)
-            
             clean_rows = []
             for _, row in data.iterrows():
                 if pd.isna(row['Tarih']): continue
                 dt = pd.to_datetime(row['Tarih'])
-                
                 clean_rows.append({
                     'Tarih': dt.strftime('%Y-%m'),
                     'PPK Faizi': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
                     'Aylık TÜFE': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
                     'Yıllık TÜFE': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
                 })
-            
-            if clean_rows:
-                return pd.DataFrame(clean_rows), "API"
-        except:
-            pass # Hata olursa manuele düş
+            if clean_rows: return pd.DataFrame(clean_rows), "TCMB EVDS (Canlı)"
+        except: pass
+    
+    return manual_data, "Manuel Veri (Yedek)"
 
-    return pd.DataFrame(manual_data), "Manuel"
-
-# --- EXCEL MOTORU ---
+# --- EXCEL DASHBOARD & ISI HARİTASI MOTORU ---
 def create_excel_dashboard(df_source):
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    
+    # Formatlar
     bold = workbook.add_format({'bold': 1})
     date_fmt = workbook.add_format({'num_format': 'dd/mm/yyyy'})
     num_fmt = workbook.add_format({'num_format': '0.00'})
     
+    # 1. HAM VERİ SAYFASI
     ws_raw = workbook.add_worksheet("Ham Veri")
     ws_raw.write_row('A1', df_source.columns, bold)
+    
     for r, row in enumerate(df_source.values):
         for c, val in enumerate(row):
-            if pd.isna(val): ws_raw.write_string(r+1, c, "")
-            elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)): ws_raw.write_datetime(r+1, c, val, date_fmt)
-            else: ws_raw.write(r+1, c, val)
+            if pd.isna(val):
+                ws_raw.write_string(r+1, c, "")
+                continue
+            if isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)):
+                ws_raw.write_datetime(r+1, c, val, date_fmt)
+            else:
+                ws_raw.write(r+1, c, val)
 
+    # 2. GRAFİK OLUŞTURUCU
     def create_sheet_with_chart(metric_col, sheet_name, chart_title):
         df_sorted = df_source.sort_values("donem_date")
-        try: pivot = df_sorted.pivot(index='donem', columns='gorunen_isim', values=metric_col)
+        try:
+            pivot = df_sorted.pivot(index='donem', columns='gorunen_isim', values=metric_col)
         except: return
+            
         ws = workbook.add_worksheet(sheet_name)
-        ws.write('A1', 'Dönem', bold); ws.write_row('B1', pivot.columns, bold); ws.write_column('A2', pivot.index)
+        ws.write('A1', 'Dönem', bold)
+        ws.write_row('B1', pivot.columns, bold)
+        ws.write_column('A2', pivot.index)
+        
         for i, col_name in enumerate(pivot.columns):
-            for r_idx, val in enumerate(pivot[col_name]):
+            col_data = pivot[col_name]
+            for r_idx, val in enumerate(col_data):
                 if pd.isna(val): ws.write_string(r_idx+1, i+1, "")
                 else: ws.write_number(r_idx+1, i+1, val, num_fmt)
+            
         chart = workbook.add_chart({'type': 'line'})
-        for i in range(len(pivot.columns)):
-            chart.add_series({'name': [sheet_name, 0, i+1], 'categories': [sheet_name, 1, 0, len(pivot), 0], 'values': [sheet_name, 1, i+1, len(pivot), i+1], 'marker': {'type': 'circle', 'size': 5}, 'line': {'width': 2.25}})
-        chart.set_title({'name': chart_title}); chart.set_size({'width': 800, 'height': 450})
+        num_rows = len(pivot)
+        num_cols = len(pivot.columns)
+        
+        for i in range(num_cols):
+            chart.add_series({
+                'name':       [sheet_name, 0, i + 1],
+                'categories': [sheet_name, 1, 0, num_rows, 0],
+                'values':     [sheet_name, 1, i + 1, num_rows, i + 1],
+                'marker':     {'type': 'circle', 'size': 5},
+                'line':       {'width': 2.25}
+            })
+            
+        chart.set_title({'name': chart_title})
+        chart.set_x_axis({'name': 'Dönem'})
+        chart.set_y_axis({'name': 'Oran (%)', 'major_gridlines': {'visible': True}})
+        chart.set_size({'width': 800, 'height': 450})
         ws.insert_chart('E2', chart)
 
+    # 3. EXCEL ISI HARİTASI
     def create_heatmap_sheet(metric_col, sheet_name):
         try:
             df_s = df_source.sort_values("donem_date")
             pivot = df_s.pivot(index='gorunen_isim', columns='donem', values=metric_col)
         except: return
+
         ws = workbook.add_worksheet(sheet_name)
-        ws.write('A1', 'Katılımcı / Dönem', bold); ws.write_row('B1', pivot.columns, bold); ws.write_column('A2', pivot.index, bold)
+        ws.write('A1', 'Katılımcı / Dönem', bold)
+        ws.write_row('B1', pivot.columns, bold)
+        ws.write_column('A2', pivot.index, bold)
+        
         for i, col_name in enumerate(pivot.columns):
-            for r_idx, val in enumerate(pivot[col_name]):
+            col_data = pivot[col_name]
+            for r_idx, val in enumerate(col_data):
                 if pd.isna(val): ws.write_string(r_idx+1, i+1, "")
                 else: ws.write_number(r_idx+1, i+1, val, num_fmt)
-        ws.conditional_format(1, 1, len(pivot), len(pivot.columns), {'type': '3_color_scale', 'min_color': '#63BE7B', 'mid_color': '#FFEB84', 'max_color': '#F8696B'})
+        
+        last_row = len(pivot)
+        last_col = len(pivot.columns)
+        
+        ws.conditional_format(1, 1, last_row, last_col, {
+            'type': '3_color_scale',
+            'min_color': '#63BE7B', 'mid_color': '#FFEB84', 'max_color': '#F8696B'
+        })
         ws.set_column(0, 0, 25)
+        ws.set_column(1, last_col, 10)
 
-    create_sheet_with_chart('tahmin_ppk_faiz', 'PPK Analiz', 'PPK Faiz Beklentileri')
-    create_sheet_with_chart('tahmin_yilsonu_enf', 'Enflasyon Analiz', 'Yıl Sonu Enflasyon Beklentileri')
-    create_heatmap_sheet('tahmin_ppk_faiz', 'Isı Haritası - PPK')
-    create_heatmap_sheet('tahmin_yilsonu_enf', 'Isı Haritası - Enf')
+    create_sheet_with_chart('tahmin_ppk_faiz', '📈 PPK Grafiği', 'PPK Faiz Beklentileri')
+    create_sheet_with_chart('tahmin_yilsonu_enf', '📈 Enflasyon Grafiği', 'Yıl Sonu Enflasyon Beklentileri')
+    create_heatmap_sheet('tahmin_ppk_faiz', '🔥 Isı Haritası - PPK')
+    create_heatmap_sheet('tahmin_yilsonu_enf', '🔥 Isı Haritası - Enf')
+
     workbook.close()
     return output.getvalue()
 
-# --- WORD RAPOR ---
+# --- WORD RAPOR OLUŞTURUCU ---
 def create_word_report(report_data):
     doc = Document()
     logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
@@ -224,29 +290,57 @@ def create_word_report(report_data):
         r = requests.get(logo_url, timeout=5)
         if r.status_code == 200:
             with io.BytesIO(r.content) as image_stream:
-                logo_par = doc.add_paragraph(); logo_par.alignment = WD_ALIGN_PARAGRAPH.RIGHT; run = logo_par.add_run(); run.add_picture(image_stream, width=Inches(1.2))
+                logo_par = doc.add_paragraph()
+                logo_par.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                run = logo_par.add_run()
+                run.add_picture(image_stream, width=Inches(1.2))
     except: pass
-    title = doc.add_heading(report_data['title'], 0); title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_info = doc.add_paragraph(); p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_info.add_run(report_data['unit'] + "\n").bold = True; p_info.add_run(report_data['date']).italic = True
+
+    title = doc.add_heading(report_data['title'], 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_info = doc.add_paragraph()
+    p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_unit = p_info.add_run(report_data['unit'] + "\n")
+    run_unit.bold = True
+    run_unit.font.size = Pt(12)
+    run_date = p_info.add_run(report_data['date'])
+    run_date.italic = True
     doc.add_paragraph("") 
-    if report_data['body']: doc.add_paragraph(report_data['body']).alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    if report_data['body']:
+        p_body = doc.add_paragraph(report_data['body'])
+        p_body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
     for block in report_data['content_blocks']:
         doc.add_paragraph("")
-        if block.get('title'): doc.add_heading(block['title'], level=2).runs[0].font.color.rgb = RGBColor(180, 0, 0)
+        if block.get('title'):
+            h = doc.add_heading(block['title'], level=2)
+            h.runs[0].font.color.rgb = RGBColor(180, 0, 0)
+
         if block['type'] == 'chart':
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t:
-                try: block['fig'].write_image(t.name, width=1000, height=500, scale=2); doc.add_picture(t.name, width=Inches(6.5))
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+                try:
+                    block['fig'].write_image(tmpfile.name, width=1000, height=500, scale=2)
+                    doc.add_picture(tmpfile.name, width=Inches(6.5))
                 except: pass
-            try: os.remove(t.name)
+            try: os.remove(tmpfile.name)
             except: pass
+
         elif block['type'] == 'table':
-            df = block['df']; table = doc.add_table(rows=1, cols=len(df.columns)); table.style = 'Light Shading Accent 1'
-            for i, c in enumerate(df.columns): table.rows[0].cells[i].text = str(c)
-            for _, row in df.iterrows():
-                rc = table.add_row().cells
-                for i, item in enumerate(row): rc[i].text = str(item)
-    output = io.BytesIO(); doc.save(output); return output.getvalue()
+            df_table = block['df']
+            table = doc.add_table(rows=1, cols=len(df_table.columns))
+            table.style = 'Light Shading Accent 1'
+            hdr_cells = table.rows[0].cells
+            for i, col_name in enumerate(df_table.columns):
+                hdr_cells[i].text = str(col_name)
+            for _, row in df_table.iterrows():
+                row_cells = table.add_row().cells
+                for i, item in enumerate(row):
+                    row_cells[i].text = str(item)
+
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
 
 # --- PDF MOTORU ---
 def check_and_download_font():
@@ -269,7 +363,11 @@ def safe_str(text, fallback):
     return text
 
 def create_custom_pdf_report(report_data):
-    fr, fb = check_and_download_font(); use_cust = (fr is not None); font = "DejaVu" if use_cust else "Helvetica"; fallback = not use_cust
+    fr, fb = check_and_download_font()
+    use_cust = (fr is not None)
+    font = "DejaVu" if use_cust else "Helvetica"
+    fallback = not use_cust
+
     class RPT(FPDF):
         def header(self):
             logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
@@ -281,17 +379,26 @@ def create_custom_pdf_report(report_data):
                 except: pass
             if os.path.exists("logo_tmp.png"): self.image("logo_tmp.png", x=170, y=10, w=30)
             self.ln(25)
-        def footer(self): self.set_y(-15); self.set_font(font, '', 8); self.set_text_color(128); self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
+        def footer(self):
+            self.set_y(-15); self.set_font(font, '', 8); self.set_text_color(128); self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
+
     pdf = RPT()
-    if use_cust: pdf.add_font("DejaVu", "", fr, uni=True); pdf.add_font("DejaVu", "B", fb, uni=True)
+    if use_cust:
+        pdf.add_font("DejaVu", "", fr, uni=True)
+        pdf.add_font("DejaVu", "B", fb, uni=True)
     pdf.add_page(); pdf.set_text_color(0)
+
     pdf.set_font(font, 'B', 20); pdf.cell(0, 10, safe_str(report_data['title'], fallback), ln=True)
     pdf.set_font(font, '', 12); pdf.set_text_color(80); pdf.cell(0, 8, safe_str(report_data['unit'], fallback), ln=True)
     pdf.set_text_color(0); pdf.set_font(font, '', 10); pdf.cell(0, 8, safe_str(report_data['date'], fallback), ln=True, align='R'); pdf.ln(5)
-    if report_data['body']: pdf.set_font(font, '', 11); pdf.multi_cell(0, 6, safe_str(report_data['body'], fallback)); pdf.ln(10)
+    
+    if report_data['body']:
+        pdf.set_font(font, '', 11); pdf.multi_cell(0, 6, safe_str(report_data['body'], fallback)); pdf.ln(10)
+
     for block in report_data['content_blocks']:
         if pdf.get_y() > 240: pdf.add_page()
-        if block.get('title'): pdf.set_font(font, 'B', 12); pdf.set_text_color(200, 0, 0); pdf.cell(0, 10, safe_str(block['title'], fallback), ln=True); pdf.set_text_color(0); pdf.ln(2)
+        if block.get('title'):
+            pdf.set_font(font, 'B', 12); pdf.set_text_color(200, 0, 0); pdf.cell(0, 10, safe_str(block['title'], fallback), ln=True); pdf.set_text_color(0); pdf.ln(2)
         if block['type'] == 'chart':
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t:
                 try: block['fig'].write_image(t.name, width=1000, height=500, scale=2); pdf.image(t.name, x=15, w=180); pdf.ln(5)
@@ -322,6 +429,7 @@ if not st.session_state['giris_yapildi']:
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("📊 Menü")
+    # MENÜYE EKLENDİ
     page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "📈 Piyasa Verileri (EVDS)", "📄 Rapor Oluştur", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
 
 def get_participant_selection():
@@ -386,6 +494,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                             nd = c1.date_input("Tarih", pd.to_datetime(t.get('tahmin_tarihi')).date())
                             ndo = c2.selectbox("Dönem", tum_donemler, index=tum_donemler.index(t['donem']) if t['donem'] in tum_donemler else 0)
                             nl = c3.text_input("Link", t.get('kaynak_link') or "")
+                            
                             def g(k): return float(t.get(k) or 0)
                             tp, te = st.tabs(["Faiz", "Enflasyon"])
                             with tp:
@@ -397,6 +506,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 c1, c2 = st.columns(2)
                                 na = c1.number_input("Ay Enf", value=g('tahmin_aylik_enf'), step=0.1)
                                 nye = c2.number_input("YS Enf", value=g('tahmin_yilsonu_enf'), step=0.1)
+                            
                             if st.form_submit_button("Kaydet"):
                                 def cv(v): return v if v!=0 else None
                                 upd = {"tahmin_tarihi": nd.strftime('%Y-%m-%d'), "donem": ndo, "kaynak_link": nl if nl else None, "katilimci_sayisi": int(nk), "tahmin_ppk_faiz": cv(npk), "tahmin_yilsonu_faiz": cv(nyf), "tahmin_aylik_enf": cv(na), "tahmin_yilsonu_enf": cv(nye)}
@@ -428,19 +538,8 @@ elif page == "Dashboard":
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # GERÇEKLEŞEN VERİLERİ ÇEK (EVDS veya MANUEL)
-        realized_df, data_source = fetch_realized_dataframe(EVDS_API_KEY)
+        realized_data = fetch_realized_data(EVDS_API_KEY)
         
-        # Gerçekleşen veriyi dict formatına çevir (Hızlı erişim için)
-        realized_dict = {}
-        if not realized_df.empty:
-            for _, row in realized_df.iterrows():
-                realized_dict[row['Tarih']] = {
-                    'ppk': row['PPK Faizi'],
-                    'enf_ay': row['Aylık TÜFE'],
-                    'enf_yil': row['Yıllık TÜFE']
-                }
-
         df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         df_latest_raw = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df_latest = pd.merge(df_latest_raw, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
@@ -455,7 +554,7 @@ elif page == "Dashboard":
         c1, c2, c3 = st.columns(3)
         c1.metric("Toplam Katılımcı", df_latest['kullanici_adi'].nunique())
         c2.metric("Güncel Tahmin Sayısı", len(df_latest))
-        c3.metric("Veri Kaynağı", data_source)
+        c3.metric("Son Güncelleme", df_latest['tahmin_tarihi'].max().strftime('%d.%m.%Y'))
         st.markdown("---")
 
         with st.sidebar:
@@ -496,28 +595,25 @@ elif page == "Dashboard":
                 fig = px.line(chart_data, x=x_axis_col, y=y, color="gorunen_isim" if not is_single_user else "donem", markers=True, title=tit, hover_data=["hover_text"])
                 if tick_format: fig.update_xaxes(tickformat=tick_format)
                 
-                # GERÇEKLEŞEN ÇİZGİSİ
-                if x_axis_mode.startswith("📅") and real_key and realized_dict:
-                    real_df_list = []
-                    for d, vals in realized_dict.items():
+                if x_axis_mode.startswith("📅") and real_key and realized_data:
+                    real_df_data = []
+                    for d, vals in realized_data.items():
                         if vals.get(real_key) is not None:
-                            real_df_list.append({'donem': d, 'deger': vals[real_key]})
+                            real_df_data.append({'donem': d, 'deger': vals[real_key]})
                     
-                    if real_df_list:
-                        rdf = pd.DataFrame(real_df_list).sort_values('donem')
-                        # Filtrele (Grafik aralığına göre)
-                        # Bu kısım önemli: Geçmiş veriyi de gösterebilmek için filtreyi geniş tutabiliriz veya tam eşleştirebiliriz.
-                        # Şimdilik grafik aralığına girenleri alalım.
+                    if real_df_data:
+                        real_df = pd.DataFrame(real_df_data).sort_values('donem')
                         min_d = chart_data['donem'].min()
                         max_d = chart_data['donem'].max()
-                        # Eğer geçmiş veri de görünsün isterseniz aşağıdaki filtreyi kaldırabilirsiniz.
-                        rdf = rdf[(rdf['donem'] >= min_d) & (rdf['donem'] <= max_d)]
+                        real_df = real_df[(real_df['donem'] >= min_d) & (real_df['donem'] <= max_d)]
                         
-                        if not rdf.empty:
+                        if not real_df.empty:
                             fig.add_trace(go.Scatter(
-                                x=rdf['donem'], y=rdf['deger'],
-                                mode='lines+markers', name='GERÇEKLEŞEN',
-                                line=dict(color='black', width=4), marker=dict(size=8, color='black')
+                                x=real_df['donem'], y=real_df['deger'],
+                                mode='lines+markers',
+                                name='GERÇEKLEŞEN',
+                                line=dict(color='black', width=4),
+                                marker=dict(size=8, color='black')
                             ))
 
                 dfr = chart_data.dropna(subset=[min_c, max_c])
