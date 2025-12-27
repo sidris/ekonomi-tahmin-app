@@ -38,7 +38,7 @@ try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
-    # EVDS Anahtarı (Zorunlu)
+    # EVDS Anahtarı (Hata yönetimi için try-except içinde kullanacağız)
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
     
     supabase: Client = create_client(url, key)
@@ -114,51 +114,47 @@ def to_excel(df):
 @st.cache_data(ttl=300) # 5 dk cache
 def fetch_evds_data(api_key, start_date_obj, end_date_obj):
     """
-    Sadece EVDS'den veri çeker. Manuel veri yoktur.
+    Sadece EVDS'den veri çeker.
+    Hata alırsa boş DataFrame ve hata mesajı döner.
     """
-    if not api_key or not evds:
-        return pd.DataFrame()
+    if not api_key:
+        return pd.DataFrame(), "API Anahtarı Eksik (secrets.toml)"
+    
+    if not evds:
+        return pd.DataFrame(), "evds kütüphanesi yüklü değil"
 
     try:
         ev = evds.evdsAPI(api_key)
-        # Tarih formatı: DD-MM-YYYY
         s_str = start_date_obj.strftime("%d-%m-%Y")
         e_str = end_date_obj.strftime("%d-%m-%Y")
         
-        # TP.PT.POL      : 1 Hafta Repo (Politika Faizi)
-        # TP.TUFE1YI.AY.O: TÜFE (Aylık % Değişim)
-        # TP.TUFE1YI.YI.O: TÜFE (Yıllık % Değişim)
-        series = ['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O']
+        # Veri Çekme
+        data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate=s_str, enddate=e_str)
         
-        data = ev.get_data(series, startdate=s_str, enddate=e_str)
-        
-        # Veri temizleme ve formatlama
+        if data is None or data.empty:
+             return pd.DataFrame(), "Veri bulunamadı veya API hatası"
+
+        # Veri İşleme
         clean_rows = []
         for _, row in data.iterrows():
             if pd.isna(row.get('Tarih')): continue
-            
-            # Tarih formatını 'YYYY-MM' (Dönem) formatına çevir
             try:
-                # EVDS bazen '2024-1' döner, bazen '01-01-2024'. Parser esnek olmalı.
                 dt = pd.to_datetime(row['Tarih'])
                 donem_fmt = dt.strftime('%Y-%m')
-            except:
-                continue
+            except: continue
 
             clean_rows.append({
-                'Tarih': row['Tarih'], # Orijinal tarih
-                'Donem': donem_fmt,    # Eşleştirme anahtarı
+                'Tarih': row['Tarih'],
+                'Donem': donem_fmt,
                 'PPK Faizi': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
                 'Aylık TÜFE': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
                 'Yıllık TÜFE': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
             })
             
-        return pd.DataFrame(clean_rows)
+        return pd.DataFrame(clean_rows), None # Hata yok
 
     except Exception as e:
-        # Hata durumunda boş dataframe dön (Manuel veri yok!)
-        st.error(f"EVDS Hatası: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), f"EVDS Bağlantı Hatası: {str(e)}"
 
 # --- EXCEL DASHBOARD & ISI HARİTASI MOTORU ---
 def create_excel_dashboard(df_source):
@@ -512,13 +508,12 @@ elif page == "Dashboard":
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # Dashboard için geniş aralıkta EVDS verisi çek (2020-2030)
-        # Böylece grafiklerdeki tüm tarihler için veri hazır olur
+        # Dashboard için geniş aralık (API Varsa)
         dash_evds_start = datetime.date(2023, 1, 1)
-        dash_evds_end = datetime.date(2030, 12, 31)
-        realized_df, _ = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
+        dash_evds_end = datetime.date(2025, 12, 31)
+        realized_df = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         
-        # Dict çevirimi
+        # Dict formatına çevir (Hızlı erişim için)
         realized_dict = {}
         if not realized_df.empty:
             for _, row in realized_df.iterrows():
@@ -716,30 +711,30 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: PIYASA VERILERI (GELİŞMİŞ FİLTRELEME & MANUEL EKSİK GİDERME)
+# SAYFA: PIYASA VERILERI (EVDS)
 # ========================================================
 elif page == "📈 Piyasa Verileri (EVDS)":
-    st.header("📈 Gerçekleşen Piyasa Verileri")
-    st.info("TCMB EVDS'den alınan gerçekleşen enflasyon ve faiz oranları.")
+    st.header("📈 Gerçekleşen Piyasa Verileri (EVDS)")
+    st.info("Bu ekran sadece TCMB EVDS üzerinden canlı veri çeker. Manuel veri yoktur.")
     
     with st.sidebar:
         st.markdown("### 📅 Tarih Aralığı")
-        # Varsayılan Bitiş Tarihi: Bugün değil, 2025 Sonuna kadar açık olsun ki gelecek verileri de seçebilsin
+        # Varsayılan: 2024 başından 2025 sonuna kadar
         sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
         ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
-        
-    df_evds = fetch_evds_data(EVDS_API_KEY, sd, ed)
     
-    c1, c2 = st.columns([3, 1])
-    with c1:
+    if EVDS_API_KEY:
+        with st.spinner("EVDS'den veri çekiliyor..."):
+            df_evds = fetch_evds_data(EVDS_API_KEY, sd, ed)
+        
         if df_evds.empty:
-            st.warning("Bu tarih aralığında veri bulunamadı veya API anahtarı eksik.")
+            st.warning("Bu tarih aralığı için veri bulunamadı veya API hatası oluştu.")
         else:
-            st.dataframe(df_evds, use_container_width=True, height=500)
-    with c2:
-        st.metric("Veri Kaynağı", "TCMB EVDS (Canlı)")
-        if not df_evds.empty:
-            st.download_button("📥 Excel Olarak İndir", to_excel(df_evds), "PiyasaVerileri.xlsx", type="primary")
+            c1, c2 = st.columns([3, 1])
+            with c1: st.dataframe(df_evds, use_container_width=True, height=500)
+            with c2: st.download_button("📥 Excel İndir", to_excel(df_evds), "EVDS_Verileri.xlsx", type="primary")
+    else:
+        st.error("Lütfen .streamlit/secrets.toml dosyasına EVDS_KEY ekleyiniz.")
 
 # ========================================================
 # SAYFA: RAPOR OLUŞTUR
@@ -851,7 +846,34 @@ elif page == "📄 Rapor Oluştur":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: VERİ GİRİŞ
+# SAYFA: KATILIMCI YÖNETİMİ
+# ========================================================
+elif page == "Katılımcı Yönetimi":
+    st.header("👥 Katılımcı Yönetimi")
+    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
+        with st.form("new_kat"):
+            c1, c2 = st.columns(2)
+            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
+            src = st.text_input("Kaynak (Opsiyonel)")
+            if st.form_submit_button("Ekle"):
+                if ad:
+                    try: 
+                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
+                        st.toast("Eklendi")
+                    except: st.error("Hata")
+    
+    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    df = pd.DataFrame(res.data)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
+        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
+        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
+            st.rerun()
+
+# ========================================================
+# SAYFA: VERİ GİRİŞ EKRANLARI (SONDA KALMASIN DİYE BURAYA ALDIM)
 # ========================================================
 elif page in ["PPK Girişi", "Enflasyon Girişi"]:
     st.header(f"➕ {page}")
@@ -902,30 +924,3 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if st.form_submit_button("✅ Kaydet"):
                 if user: upsert_tahmin(user, donem, cat, tarih, link, data); st.toast("Kaydedildi!", icon="🎉")
                 else: st.error("Kullanıcı Seçiniz")
-
-# ========================================================
-# SAYFA: KATILIMCI YÖNETİMİ
-# ========================================================
-elif page == "Katılımcı Yönetimi":
-    st.header("👥 Katılımcı Yönetimi")
-    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
-        with st.form("new_kat"):
-            c1, c2 = st.columns(2)
-            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
-            src = st.text_input("Kaynak (Opsiyonel)")
-            if st.form_submit_button("Ekle"):
-                if ad:
-                    try: 
-                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
-                        st.toast("Eklendi")
-                    except: st.error("Hata")
-    
-    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
-    df = pd.DataFrame(res.data)
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
-        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
-            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
-            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
-            st.rerun()
