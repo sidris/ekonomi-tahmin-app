@@ -175,105 +175,170 @@ def to_excel(df):
 
 
 # --------------------------------------------------------
-# EVDS (TCMB) - SADECE REQUESTS + HEADER KEY
-# (NOT: Fonksiyon adı v2 -> eski cache/çakışma tamamen kırılır)
+# EVDS (TCMB) - PATH-STYLE (ÖNCE) + HEADER KEY + FALLBACK
 # --------------------------------------------------------
 @st.cache_data(ttl=300)
-def fetch_evds_data_v2(api_key, start_date_obj, end_date_obj):
+def fetch_evds_data(api_key: str, start_date_obj: datetime.date, end_date_obj: datetime.date):
     """
     EVDS'den veri çeker.
-    DÖNÜŞ: (DataFrame, hata_mesajı|None)
+    Dönüş: (df, err) -> err None ise başarılı
     """
     if not api_key:
-        return pd.DataFrame(), "API Anahtarı Eksik (EVDS_KEY secrets.toml içinde olmalı)"
+        return pd.DataFrame(), "API Anahtarı Eksik (secrets.toml içinde EVDS_KEY)"
 
-    base_url = "https://evds2.tcmb.gov.tr/service/evds/"
+    s_str = start_date_obj.strftime("%d-%m-%Y")
+    e_str = end_date_obj.strftime("%d-%m-%Y")
+
+    base = "https://evds2.tcmb.gov.tr/service/evds/"
     series = "TP.PT.POL-TP.TUFE1YI.AY.O-TP.TUFE1YI.YI.O"
 
-    params = {
-        "series": series,
-        "startDate": start_date_obj.strftime("%d-%m-%Y"),
-        "endDate": end_date_obj.strftime("%d-%m-%Y"),
-        "type": "json",
-        "formulas": "",
-        "frequency": "",
-        "aggregationTypes": "",
-    }
+    # 1) EVDS'in çoğu senaryoda beklediği: PATH-STYLE
+    url1 = (
+        f"{base}"
+        f"series={series}"
+        f"&startDate={s_str}"
+        f"&endDate={e_str}"
+        f"&type=json"
+        f"&formulas="
+        f"&frequency="
+        f"&aggregationTypes="
+    )
 
-    headers = {
-        "key": api_key,  # kritik: key HEADER'da
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-    }
+    # 2) Bazı ortamlarda: query-style
+    url2 = (
+        f"{base}?"
+        f"series={series}"
+        f"&startDate={s_str}"
+        f"&endDate={e_str}"
+        f"&type=json"
+        f"&formulas="
+        f"&frequency="
+        f"&aggregationTypes="
+    )
 
-    try:
-        r = requests.get(base_url, params=params, headers=headers, timeout=25)
+    headers = {"key": api_key, "User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+    def _try(url: str):
+        r = requests.get(url, headers=headers, timeout=25)
+        if r.status_code == 404:
+            return None, f"EVDS HTTP 404 (URL/endpoint format). Url: {url}"
         r.raise_for_status()
-        j = r.json()
+        try:
+            j = r.json()
+        except Exception:
+            return None, f"EVDS JSON parse hatası. Url: {url}"
 
-        items = j.get("items") or []
+        items = j.get("items") or j.get("Items") or j.get("data") or j.get("Data")
         if not items:
-            return pd.DataFrame(), f"EVDS: Veri yok. Cevap keys: {list(j.keys())}"
+            if isinstance(j, list):
+                items = j
+            else:
+                return None, f"EVDS boş/uyumsuz cevap. Keys: {list(j.keys()) if isinstance(j, dict) else type(j)}"
 
-        raw = pd.DataFrame(items)
+        df_raw = pd.DataFrame(items)
+        if df_raw.empty:
+            return pd.DataFrame(), "EVDS boş döndü."
+        return df_raw, None
 
-        date_col = "Tarih" if "Tarih" in raw.columns else ("DATE" if "DATE" in raw.columns else None)
-        if not date_col:
-            return pd.DataFrame(), f"EVDS: Tarih kolonu yok. Kolonlar: {list(raw.columns)}"
+    df_raw, err = _try(url1)
+    if err and "404" in err:
+        df_raw, err2 = _try(url2)
+        if err2 is None:
+            err = None
+        else:
+            return pd.DataFrame(), err  # ilk 404 mesajını döndür
 
-        def fcol(row, col):
-            v = row.get(col)
-            try:
-                return float(str(v).replace(",", ".")) if pd.notnull(v) and str(v).strip() != "" else None
-            except:
+    if err:
+        return pd.DataFrame(), err
+
+    # Tarih kolonu
+    if "Tarih" not in df_raw.columns:
+        for cand in ["DATE", "Date", "tarih"]:
+            if cand in df_raw.columns:
+                df_raw["Tarih"] = df_raw[cand]
+                break
+
+    if "Tarih" not in df_raw.columns:
+        return pd.DataFrame(), f"EVDS yanıtında tarih alanı yok. Kolonlar: {list(df_raw.columns)}"
+
+    # EVDS kolonları bazen TP.PT.POL bazen TP_PT_POL gelir
+    def pick_col(*cands):
+        for c in cands:
+            if c in df_raw.columns:
+                return c
+        return None
+
+    col_ppk = pick_col("TP_PT_POL", "TP.PT.POL")
+    col_ay = pick_col("TP_TUFE1YI_AY_O", "TP.TUFE1YI.AY.O")
+    col_yil = pick_col("TP_TUFE1YI_YI_O", "TP.TUFE1YI.YI.O")
+
+    def to_float(v):
+        try:
+            if pd.isna(v) or v == "":
                 return None
+            return float(str(v).replace(",", "."))
+        except Exception:
+            return None
 
-        out = []
-        for _, row in raw.iterrows():
-            dt = pd.to_datetime(row[date_col], dayfirst=True, errors="coerce")
-            if pd.isna(dt):
-                continue
-            out.append(
-                {
-                    "Tarih": row[date_col],
-                    "Donem": dt.strftime("%Y-%m"),
-                    "PPK Faizi": fcol(row, "TP_PT_POL"),
-                    "Aylık TÜFE": fcol(row, "TP_TUFE1YI_AY_O"),
-                    "Yıllık TÜFE": fcol(row, "TP_TUFE1YI_YI_O"),
-                }
-            )
+    clean_rows = []
+    for _, row in df_raw.iterrows():
+        dt = pd.to_datetime(row["Tarih"], dayfirst=True, errors="coerce")
+        if pd.isna(dt):
+            continue
+        clean_rows.append(
+            {
+                "Tarih": row["Tarih"],
+                "Donem": dt.strftime("%Y-%m"),
+                "PPK Faizi": to_float(row[col_ppk]) if col_ppk else None,
+                "Aylık TÜFE": to_float(row[col_ay]) if col_ay else None,
+                "Yıllık TÜFE": to_float(row[col_yil]) if col_yil else None,
+            }
+        )
 
-        return pd.DataFrame(out), None
+    df = pd.DataFrame(clean_rows)
+    if df.empty:
+        return pd.DataFrame(), "EVDS çekildi ama temiz veri üretilemedi (seri/kolon adı kontrol)."
 
-    except requests.exceptions.HTTPError as e:
-        return pd.DataFrame(), f"EVDS HTTP Hatası: {e} (status={getattr(r, 'status_code', None)})"
-    except requests.exceptions.RequestException as e:
-        return pd.DataFrame(), f"EVDS Bağlantı/HTTP Hatası: {e}"
-    except Exception as e:
-        return pd.DataFrame(), f"EVDS Parse Hatası: {e}"
+    return df, None
 
 
 def evds_test_widget():
     st.markdown("#### 🧪 EVDS Bağlantı Testi")
-    st.caption("Buradaki Final URL mutlaka .../service/evds/?series=... formatında olmalı.")
+    st.caption("404 alıyorsan burada 'Final URL' formatını gör: path-style mı query-style mı çalışıyor?")
     if st.button("EVDS Test Et"):
         if not EVDS_API_KEY:
             st.error("EVDS_KEY yok.")
             return
-        test_url = "https://evds2.tcmb.gov.tr/service/evds/"
-        params = {"series": "TP.PT.POL", "startDate": "01-01-2024", "endDate": "31-01-2024", "type": "json"}
-        try:
-            r = requests.get(
-                test_url,
-                params=params,
-                headers={"key": EVDS_API_KEY, "User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-                timeout=25,
-            )
-            st.write("Status:", r.status_code)
-            st.write("Final URL:", r.url)
-            st.code(r.text[:800])
-        except Exception as e:
-            st.error(str(e))
+
+        base = "https://evds2.tcmb.gov.tr/service/evds/"
+        headers = {"key": EVDS_API_KEY, "User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+        s_str = "01-01-2024"
+        e_str = "31-01-2024"
+        series = "TP.PT.POL"
+
+        url_path_style = f"{base}series={series}&startDate={s_str}&endDate={e_str}&type=json"
+        url_query_style = f"{base}?series={series}&startDate={s_str}&endDate={e_str}&type=json"
+
+        def hit(u):
+            try:
+                r = requests.get(u, headers=headers, timeout=25)
+                return r.status_code, r.url, r.text[:600]
+            except Exception as e:
+                return None, u, str(e)
+
+        st.write("Path-style deneme:")
+        s1, u1, t1 = hit(url_path_style)
+        st.write("Status:", s1)
+        st.write("Final URL:", u1)
+        st.code(t1)
+
+        st.write("---")
+        st.write("Query-style deneme:")
+        s2, u2, t2 = hit(url_query_style)
+        st.write("Status:", s2)
+        st.write("Final URL:", u2)
+        st.code(t2)
 
 
 # --------------------------------------------------------
@@ -598,7 +663,7 @@ def create_custom_pdf_report(report_data):
 
 
 # --------------------------------------------------------
-# AUTH (FORM İLE DÜZELTİLDİ)
+# AUTH (FORM DÜZELTİLDİ)
 # --------------------------------------------------------
 if "giris_yapildi" not in st.session_state:
     st.session_state["giris_yapildi"] = False
@@ -821,12 +886,11 @@ elif page == "Dashboard":
         df_t["tahmin_tarihi"] = pd.to_datetime(df_t["tahmin_tarihi"], errors="coerce")
         df_t = df_t.sort_values(by="tahmin_tarihi")
 
-        # EVDS gerçekleşen veriler (opsiyonel)
         realized_dict = {}
         dash_evds_start = datetime.date(2023, 1, 1)
         dash_evds_end = datetime.date(2030, 12, 31)
 
-        realized_df, evds_err = fetch_evds_data_v2(EVDS_API_KEY, dash_evds_start, dash_evds_end)
+        realized_df, evds_err = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         if evds_err:
             st.sidebar.warning(f"EVDS: {evds_err}")
             realized_df = pd.DataFrame()
@@ -928,7 +992,6 @@ elif page == "Dashboard":
                 if tick_format:
                     fig.update_xaxes(tickformat=tick_format)
 
-                # Gerçekleşen sadece hedef dönem görünümünde ve data varsa
                 if (not is_single_user) and real_key and realized_dict and x_axis_mode.startswith("📅"):
                     real_df_data = []
                     for d, vals in realized_dict.items():
@@ -1148,7 +1211,7 @@ elif page == "📈 Piyasa Verileri (EVDS)":
 
     if EVDS_API_KEY:
         with st.spinner("EVDS'den veri çekiliyor..."):
-            df_evds, err = fetch_evds_data_v2(EVDS_API_KEY, sd, ed)
+            df_evds, err = fetch_evds_data(EVDS_API_KEY, sd, ed)
 
         if err:
             st.warning(err)
