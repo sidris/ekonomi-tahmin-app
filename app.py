@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 import io
 import datetime
 import requests
-import numpy as np
 
 # --- OPSİYONEL KÜTÜPHANE KONTROLÜ ---
 try:
@@ -28,7 +27,6 @@ st.markdown(
     """
 <style>
 .stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-.stButton button { width: 100%; border-radius: 8px; font-weight: 600; }
 div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; }
 h1, h2, h3 { color: #2c3e50; }
 div[data-testid="stDataFrame"] { width: 100%; }
@@ -113,7 +111,7 @@ def parse_range_input(text_input, default_median=0.0):
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     date_str = forecast_date.strftime("%Y-%m-%d")
     
-    # 1. Önce ID'yi kontrol et
+    # 1. Önce ID kontrolü
     check_res = (
         supabase.table(TABLE_TAHMIN)
         .select("id")
@@ -165,6 +163,7 @@ def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_
         return pd.DataFrame(), "EVDS_KEY eksik."
     try:
         results = {}
+        # formulas=1 (Aylık), formulas=2 (Yıllık)
         for formulas, out_col in [(1, "TUFE_Aylik"), (2, "TUFE_Yillik")]:
             url = _evds_url_single(EVDS_TUFE_SERIES, start_date, end_date, formulas=formulas)
             r = requests.get(url, headers=_evds_headers(api_key), timeout=25)
@@ -266,7 +265,7 @@ with st.sidebar:
     ])
 
 # =========================================================
-# SAYFA: DASHBOARD (DÜZELTİLMİŞ & GELİŞMİŞ)
+# SAYFA: DASHBOARD (TAMİR EDİLDİ + ISI HARİTASI GELDİ)
 # =========================================================
 if page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
@@ -275,26 +274,26 @@ if page == "Dashboard":
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
     
-    # Kategori bilgisini garanti almak için select("*") yapıyoruz
     res_k = supabase.table(TABLE_KATILIMCI).select("*").execute()
     df_k = pd.DataFrame(res_k.data)
 
-    if df_t.empty or df_k.empty:
-        st.info("Henüz yeterli veri girişi yok.")
+    if df_t.empty:
+        st.info("Henüz tahmin verisi girilmemiş.")
         st.stop()
 
     # 2. Veri Temizliği
     df_t = clean_and_sort_data(df_t)
     
-    # 3. Merge İşlemi (KeyError'u önleyen sağlam yapı)
-    # Kolon isimlerini garantiye alalım
-    if "ad_soyad" in df_k.columns:
-        df_k = df_k.rename(columns={"ad_soyad": "kullanici_adi_key"})
-    
-    # Merge
-    df_merged = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="kullanici_adi_key", how="left")
-    
-    # KeyError Çözümü: Kolonlar oluşmadıysa manuel oluştur
+    # 3. GÜVENLİ MERGE (KEYERROR ÇÖZÜMÜ)
+    # df_k (Katılımcı) tablosu boşsa veya sütunları eksikse hata vermemesi için:
+    if not df_k.empty and "ad_soyad" in df_k.columns:
+        df_k = df_k.rename(columns={"ad_soyad": "join_key"})
+        df_merged = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="join_key", how="left")
+    else:
+        # Eğer katılımcı tablosu yoksa sadece tahmin tablosunu kullan
+        df_merged = df_t.copy()
+
+    # Sütun Kontrolleri (KeyError Önleyici)
     if "kategori" not in df_merged.columns:
         df_merged["kategori"] = "Bireysel"
     if "anket_kaynagi" not in df_merged.columns:
@@ -311,20 +310,26 @@ if page == "Dashboard":
         axis=1
     )
     
-    df_merged["yil"] = df_merged["donem"].apply(lambda x: str(x).split("-")[0])
+    # Yıl sütunu
+    if "donem" in df_merged.columns:
+        df_merged["yil"] = df_merged["donem"].apply(lambda x: str(x).split("-")[0] if pd.notnull(x) else "")
 
     # En güncel tahminleri bul
-    df_latest = df_merged.sort_values("tahmin_tarihi").drop_duplicates(subset=["kullanici_adi", "donem"], keep="last")
+    if "tahmin_tarihi" in df_merged.columns:
+        df_latest = df_merged.sort_values("tahmin_tarihi").drop_duplicates(subset=["kullanici_adi", "donem"], keep="last")
+    else:
+        df_latest = df_merged.copy()
 
     # --- ÜST METRİKLER ---
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Toplam Katılımcı", df_latest["kullanici_adi"].nunique())
     m2.metric("Toplam Tahmin", len(df_latest))
     
-    avg_ppk = df_latest[df_latest["donem"] == "2025-01"]["tahmin_ppk_faiz"].median()
+    # Örnek Metrikler (Ocak 2025 varsa)
+    avg_ppk = df_latest[df_latest["donem"] == "2025-01"]["tahmin_ppk_faiz"].median() if "tahmin_ppk_faiz" in df_latest else None
     m3.metric("Ocak '25 PPK Medyan", f"%{avg_ppk}" if pd.notnull(avg_ppk) else "-")
     
-    avg_inf = df_latest[df_latest["donem"] == "2025-01"]["tahmin_aylik_enf"].median()
+    avg_inf = df_latest[df_latest["donem"] == "2025-01"]["tahmin_aylik_enf"].median() if "tahmin_aylik_enf" in df_latest else None
     m4.metric("Ocak '25 Enflasyon Medyan", f"%{avg_inf}" if pd.notnull(avg_inf) else "-")
     
     st.markdown("---")
@@ -337,34 +342,37 @@ if page == "Dashboard":
             "tahmin_aylik_enf", "tahmin_yilsonu_enf"
         ], format_func=lambda x: x.replace("tahmin_", "").replace("_", " ").upper())
         
-        cats = st.multiselect("Kategori", sorted(df_latest["kategori"].unique()), default=sorted(df_latest["kategori"].unique()))
+        # Kategori Filtresi
+        all_cats = sorted(df_latest["kategori"].unique())
+        cats = st.multiselect("Kategori", all_cats, default=all_cats)
         
         # Filtreli veri
         df_filtered = df_latest[df_latest["kategori"].isin(cats)]
         
-        users = st.multiselect("Katılımcılar", sorted(df_filtered["gorunen_isim"].unique()), default=sorted(df_filtered["gorunen_isim"].unique()))
+        # Kullanıcı Filtresi
+        all_users = sorted(df_filtered["gorunen_isim"].unique())
+        users = st.multiselect("Katılımcılar", all_users, default=all_users)
         
         target_df = df_filtered[df_filtered["gorunen_isim"].isin(users)].copy()
 
     # --- GRAFİK 1: ZAMAN SERİSİ (TREND) ---
-    st.subheader("📈 Tahmin Trendleri")
-    if not target_df.empty:
+    st.subheader(f"📈 {param_type.replace('_', ' ').title()} - Trend Analizi")
+    if not target_df.empty and param_type in target_df.columns:
         fig_line = px.line(
             target_df.sort_values("donem_date"),
             x="donem", 
             y=param_type, 
             color="gorunen_isim",
             markers=True,
-            title=f"{param_type.replace('_', ' ').title()} - Dönemsel Değişim",
             hover_data=["tahmin_tarihi"]
         )
         st.plotly_chart(fig_line, use_container_width=True)
     else:
         st.warning("Seçilen kriterlere uygun veri yok.")
 
-    # --- GRAFİK 2: ISI HARİTASI (HEATMAP) - GERİ GELDİ! ---
+    # --- GRAFİK 2: ISI HARİTASI (HEATMAP) ---
     st.subheader("🔥 Tahmin Isı Haritası")
-    if not target_df.empty:
+    if not target_df.empty and param_type in target_df.columns:
         try:
             # Pivot table: Satırlar=Katılımcı, Sütunlar=Dönem, Değer=Tahmin
             pivot_df = target_df.pivot_table(index="gorunen_isim", columns="donem", values=param_type)
@@ -376,45 +384,44 @@ if page == "Dashboard":
                 y=pivot_df.index,
                 aspect="auto",
                 color_continuous_scale="RdBu_r",
-                text_auto=".2f",
-                title=f"{param_type} Isı Haritası"
+                text_auto=".2f"
             )
             fig_heat.update_xaxes(side="top")
             st.plotly_chart(fig_heat, use_container_width=True)
         except Exception as e:
-            st.error(f"Isı haritası oluşturulamadı: {e}")
+            st.info(f"Isı haritası için yeterli veri çeşitliliği yok. ({e})")
 
-    # --- GRAFİK 3: DAĞILIM (BOXPLOT) - YENİ! ---
+    # --- GRAFİK 3: DAĞILIM (BOXPLOT) ---
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("📦 Tahmin Dağılımı (Boxplot)")
-        if not target_df.empty:
+        st.subheader("📦 Tahmin Dağılımı")
+        if not target_df.empty and param_type in target_df.columns:
             fig_box = px.box(
                 target_df, 
                 x="donem", 
                 y=param_type, 
-                points="all",
                 color="donem",
-                title="Dönem Bazlı Tahmin Dağılımı"
+                points="all"
             )
             st.plotly_chart(fig_box, use_container_width=True)
 
     # --- GRAFİK 4: SON DURUM BAR ---
     with c2:
-        st.subheader("📊 Son Dönem Karşılaştırma")
-        last_period = target_df["donem"].max()
-        df_last_p = target_df[target_df["donem"] == last_period]
-        
-        if not df_last_p.empty:
-            fig_bar = px.bar(
-                df_last_p.sort_values(param_type),
-                x="gorunen_isim",
-                y=param_type,
-                color="kategori",
-                text_auto=".2f",
-                title=f"{last_period} Dönemi İçin Tahminler"
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
+        st.subheader("📊 Dönem Kıyaslaması")
+        if not target_df.empty:
+            last_period = target_df["donem"].max()
+            df_last_p = target_df[target_df["donem"] == last_period]
+            
+            if not df_last_p.empty:
+                fig_bar = px.bar(
+                    df_last_p.sort_values(param_type),
+                    x="gorunen_isim",
+                    y=param_type,
+                    color="kategori",
+                    text_auto=".2f",
+                    title=f"{last_period} Dönemi"
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
 
 # =========================================================
 # SAYFA: PİYASA VERİLERİ (EVDS + BIS)
@@ -467,8 +474,11 @@ elif page == "Katılımcı Yönetimi":
             cat = c2.radio("Tip", ["Bireysel","Kurumsal"])
             src = st.text_input("Kaynak")
             if st.form_submit_button("Ekle") and ad:
-                supabase.table(TABLE_KATILIMCI).insert({"ad_soyad":normalize_name(ad),"kategori":cat,"anket_kaynagi":src or None}).execute()
-                st.success("Eklendi")
+                try:
+                    supabase.table(TABLE_KATILIMCI).insert({"ad_soyad":normalize_name(ad),"kategori":cat,"anket_kaynagi":src or None}).execute()
+                    st.success("Eklendi")
+                except Exception as e:
+                    st.error(f"Hata: {e}")
 
     res = supabase.table(TABLE_KATILIMCI).select("*").execute()
     df = pd.DataFrame(res.data)
@@ -476,9 +486,13 @@ elif page == "Katılımcı Yönetimi":
         st.dataframe(df, use_container_width=True)
         to_del = st.selectbox("Sil", df["ad_soyad"].unique())
         if st.button("Sil"):
-            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi",to_del).execute()
-            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad",to_del).execute()
-            st.rerun()
+            try:
+                supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi",to_del).execute()
+                supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad",to_del).execute()
+                st.success("Silindi")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Hata: {e}")
 
 elif page in ["PPK Girişi", "Enflasyon Girişi"]:
     st.header(f"📝 {page}")
@@ -490,13 +504,15 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
         st.error("Önce katılımcı ekleyin.")
         st.stop()
         
-    df_users["disp"] = df_users.apply(lambda x: f"{x['ad_soyad']} ({x['anket_kaynagi']})" if x['anket_kaynagi'] else x['ad_soyad'], axis=1)
+    df_users["disp"] = df_users.apply(lambda x: f"{x['ad_soyad']} ({x['anket_kaynagi']})" if x.get('anket_kaynagi') else x['ad_soyad'], axis=1)
     
     with st.form("entry"):
         c1, c2, c3 = st.columns(3)
         sel_u = c1.selectbox("Katılımcı", df_users["disp"].unique())
-        real_u = df_users[df_users["disp"]==sel_u].iloc[0]["ad_soyad"]
-        cat_u = df_users[df_users["disp"]==sel_u].iloc[0]["kategori"]
+        # Seçilen kişinin gerçek adını ve kategorisini bul
+        selected_row = df_users[df_users["disp"]==sel_u].iloc[0]
+        real_u = selected_row["ad_soyad"]
+        cat_u = selected_row.get("kategori", "Bireysel")
         
         donem = c2.selectbox("Dönem", tum_donemler)
         tarih = c3.date_input("Tarih", datetime.date.today())
@@ -507,14 +523,44 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             col1, col2 = st.columns(2)
             v1 = col1.number_input("PPK Tahmin %", step=0.25)
             v2 = col2.number_input("Yıl Sonu Faiz %", step=0.25)
-            data = {"tahmin_ppk_faiz":v1, "tahmin_yilsonu_faiz":v2}
+            
+            with st.expander("Detay (Aralık / Min-Max)"):
+                 ec1, ec2 = st.columns(2)
+                 mn1 = ec1.number_input("Min PPK", step=0.25)
+                 mx1 = ec1.number_input("Max PPK", step=0.25)
+                 mn2 = ec2.number_input("Min Yıl Sonu", step=0.25)
+                 mx2 = ec2.number_input("Max Yıl Sonu", step=0.25)
+
+            data = {
+                "tahmin_ppk_faiz":v1, "tahmin_yilsonu_faiz":v2,
+                "min_ppk_faiz":mn1, "max_ppk_faiz":mx1,
+                "min_yilsonu_faiz":mn2, "max_yilsonu_faiz":mx2
+            }
         else:
             c1,c2,c3 = st.columns(3)
             v1 = c1.number_input("Aylık Enf %", step=0.1)
             v2 = c2.number_input("Yıllık Enf %", step=0.1)
             v3 = c3.number_input("Yıl Sonu Enf %", step=0.1)
-            data = {"tahmin_aylik_enf":v1, "tahmin_yillik_enf":v2, "tahmin_yilsonu_enf":v3}
+            
+            with st.expander("Detay (Min-Max)"):
+                 ec1, ec2, ec3 = st.columns(3)
+                 mn1 = ec1.number_input("Min Aylık", step=0.1)
+                 mx1 = ec1.number_input("Max Aylık", step=0.1)
+                 mn2 = ec2.number_input("Min Yıllık", step=0.1)
+                 mx2 = ec2.number_input("Max Yıllık", step=0.1)
+                 mn3 = ec3.number_input("Min Yıl Sonu", step=0.1)
+                 mx3 = ec3.number_input("Max Yıl Sonu", step=0.1)
+
+            data = {
+                "tahmin_aylik_enf":v1, "tahmin_yillik_enf":v2, "tahmin_yilsonu_enf":v3,
+                "min_aylik_enf":mn1, "max_aylik_enf":mx1,
+                "min_yillik_enf":mn2, "max_yillik_enf":mx2,
+                "min_yilsonu_enf":mn3, "max_yilsonu_enf":mx3,
+            }
             
         if st.form_submit_button("Kaydet"):
-            upsert_tahmin(real_u, donem, cat_u, tarih, link, data)
-            st.success("Kaydedildi!")
+            try:
+                upsert_tahmin(real_u, donem, cat_u, tarih, link, data)
+                st.success("Kaydedildi!")
+            except Exception as e:
+                st.error(f"Kayıt Hatası: {e}")
