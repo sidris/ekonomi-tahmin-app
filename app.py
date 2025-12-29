@@ -7,7 +7,7 @@ import io
 import datetime
 import requests
 
-# --- İSTEĞE BAĞLI KÜTÜPHANE KONTROLÜ (HATA VERMEMESİ İÇİN) ---
+# --- İSTEĞE BAĞLI KÜTÜPHANE KONTROLÜ ---
 try:
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
@@ -56,7 +56,8 @@ TABLE_KATILIMCI = "katilimcilar"
 
 EVDS_BASE = "https://evds2.tcmb.gov.tr/service/evds"
 
-# DÜZELTİLEN KISIM: Sadece TÜFE Genel Endeksi (Hatasız Kod)
+# --- DÜZELTİLEN KISIM BURASI ---
+# Hatalı olan 'TP.APIFON4-TP.FG.J0-3...' yerine sadece ana TÜFE kodu:
 EVDS_TUFE_SERIES = "TP.FG.J0"  
 
 # =========================================================
@@ -157,7 +158,7 @@ def to_excel(df):
     return output.getvalue()
 
 # =========================================================
-# 4) EVDS (TÜFE AYLIK+YILLIK) - HATASIZ URL YAPISI
+# 4) EVDS (TÜFE AYLIK+YILLIK) - DÜZELTİLMİŞ URL YAPISI
 # =========================================================
 def _evds_headers(api_key: str) -> dict:
     return {
@@ -167,7 +168,7 @@ def _evds_headers(api_key: str) -> dict:
     }
 
 def _evds_url_single(series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int | None) -> str:
-    # EVDS, "DD-MM-YYYY" formatını sever
+    # EVDS "DD-MM-YYYY" formatı ister
     s = start_date.strftime("%d-%m-%Y")
     e = end_date.strftime("%d-%m-%Y")
     url = f"{EVDS_BASE}/series={series_code}&startDate={s}&endDate={e}&type=json"
@@ -177,7 +178,7 @@ def _evds_url_single(series_code: str, start_date: datetime.date, end_date: date
 
 def _evds_get_json(url: str, api_key: str, timeout: int = 25) -> dict:
     r = requests.get(url, headers=_evds_headers(api_key), timeout=timeout)
-    # Hata kontrolü
+    # 200 harici her şey hata olarak ele alınır
     if r.status_code != 200:
         raise requests.HTTPError(f"EVDS Hatası (Kod: {r.status_code})")
     return r.json()
@@ -185,7 +186,7 @@ def _evds_get_json(url: str, api_key: str, timeout: int = 25) -> dict:
 @st.cache_data(ttl=300)
 def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
     """
-    Sadece 'TP.FG.J0' (TÜFE) serisi kullanılır.
+    Sadece 'TP.FG.J0' (TÜFE Genel) serisi kullanılır.
     formulas=1 -> Aylık Değişim
     formulas=2 -> Yıllık Değişim
     """
@@ -201,7 +202,6 @@ def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_
             items = js.get("items", [])
             
             if not items:
-                # Veri yoksa boş geç
                 continue
 
             df = pd.DataFrame(items)
