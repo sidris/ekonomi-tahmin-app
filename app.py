@@ -7,7 +7,7 @@ import io
 import datetime
 import requests
 
-# --- İSTEĞE BAĞLI KÜTÜPHANE KONTROLÜ ---
+# --- İSTEĞE BAĞLI KÜTÜPHANE KONTROLÜ (HATA VERMEMESİ İÇİN) ---
 try:
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
@@ -56,8 +56,7 @@ TABLE_KATILIMCI = "katilimcilar"
 
 EVDS_BASE = "https://evds2.tcmb.gov.tr/service/evds"
 
-# --- DÜZELTİLEN KISIM BURASI ---
-# Hatalı olan 'TP.APIFON4-TP.FG.J0-3...' yerine sadece ana TÜFE kodu:
+# TÜFE Genel Endeksi
 EVDS_TUFE_SERIES = "TP.FG.J0"  
 
 # =========================================================
@@ -158,7 +157,7 @@ def to_excel(df):
     return output.getvalue()
 
 # =========================================================
-# 4) EVDS (TÜFE AYLIK+YILLIK) - DÜZELTİLMİŞ URL YAPISI
+# 4) EVDS (TÜFE AYLIK+YILLIK) - DÜZELTİLMİŞ VERSİYON
 # =========================================================
 def _evds_headers(api_key: str) -> dict:
     return {
@@ -167,18 +166,8 @@ def _evds_headers(api_key: str) -> dict:
         "Accept": "application/json,text/plain,*/*",
     }
 
-def _evds_url_single(series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int | None) -> str:
-    # EVDS "DD-MM-YYYY" formatı ister
-    s = start_date.strftime("%d-%m-%Y")
-    e = end_date.strftime("%d-%m-%Y")
-    url = f"{EVDS_BASE}/series={series_code}&startDate={s}&endDate={e}&type=json"
-    if formulas is not None:
-        url += f"&formulas={int(formulas)}"
-    return url
-
 def _evds_get_json(url: str, api_key: str, timeout: int = 25) -> dict:
     r = requests.get(url, headers=_evds_headers(api_key), timeout=timeout)
-    # 200 harici her şey hata olarak ele alınır
     if r.status_code != 200:
         raise requests.HTTPError(f"EVDS Hatası (Kod: {r.status_code})")
     return r.json()
@@ -186,54 +175,57 @@ def _evds_get_json(url: str, api_key: str, timeout: int = 25) -> dict:
 @st.cache_data(ttl=300)
 def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
     """
-    Sadece 'TP.FG.J0' (TÜFE Genel) serisi kullanılır.
-    formulas=1 -> Aylık Değişim
-    formulas=2 -> Yıllık Değişim
+    TÜFE verilerini EVDS'den çeker.
+    Her seri ve formül için AYRI istek atar (EVDS API zorunluluğu).
     """
     if not api_key:
         return pd.DataFrame(), "EVDS_KEY eksik (secrets.toml)"
 
     try:
+        s = start_date.strftime("%d-%m-%Y")
+        e = end_date.strftime("%d-%m-%Y")
+        
         results = {}
-        # 1: Aylık, 2: Yıllık
-        for formulas, out_col in [(1, "TUFE_Aylik"), (2, "TUFE_Yillik")]:
-            url = _evds_url_single(EVDS_TUFE_SERIES, start_date, end_date, formulas=formulas)
-            js = _evds_get_json(url, api_key)
-            items = js.get("items", [])
-            
-            if not items:
-                continue
+        
+        # 1) Aylık TÜFE (formulas=1)
+        url_monthly = f"{EVDS_BASE}/series={EVDS_TUFE_SERIES}&startDate={s}&endDate={e}&type=json&formulas=1"
+        try:
+            js_monthly = _evds_get_json(url_monthly, api_key)
+            items_monthly = js_monthly.get("items", [])
+            if items_monthly:
+                df_m = pd.DataFrame(items_monthly)
+                df_m["Tarih_dt"] = pd.to_datetime(df_m["Tarih"], dayfirst=True, errors="coerce")
+                df_m = df_m.dropna(subset=["Tarih_dt"]).sort_values("Tarih_dt")
+                df_m["Donem"] = df_m["Tarih_dt"].dt.strftime("%Y-%m")
+                val_col_m = [c for c in df_m.columns if c not in ["Tarih", "UNIXTIME", "Tarih_dt", "Donem"]][0]
+                results["TUFE_Aylik"] = pd.DataFrame({
+                    "Tarih": df_m["Tarih_dt"].dt.strftime("%d-%m-%Y"),
+                    "Donem": df_m["Donem"],
+                    "TUFE_Aylik": pd.to_numeric(df_m[val_col_m], errors="coerce"),
+                })
+        except Exception as e:
+            st.warning(f"Aylık TÜFE verisi alınamadı: {e}")
+        
+        # 2) Yıllık TÜFE (formulas=2)
+        url_yearly = f"{EVDS_BASE}/series={EVDS_TUFE_SERIES}&startDate={s}&endDate={e}&type=json&formulas=2"
+        try:
+            js_yearly = _evds_get_json(url_yearly, api_key)
+            items_yearly = js_yearly.get("items", [])
+            if items_yearly:
+                df_y = pd.DataFrame(items_yearly)
+                df_y["Tarih_dt"] = pd.to_datetime(df_y["Tarih"], dayfirst=True, errors="coerce")
+                df_y = df_y.dropna(subset=["Tarih_dt"]).sort_values("Tarih_dt")
+                df_y["Donem"] = df_y["Tarih_dt"].dt.strftime("%Y-%m")
+                val_col_y = [c for c in df_y.columns if c not in ["Tarih", "UNIXTIME", "Tarih_dt", "Donem"]][0]
+                results["TUFE_Yillik"] = pd.DataFrame({
+                    "Tarih": df_y["Tarih_dt"].dt.strftime("%d-%m-%Y"),
+                    "Donem": df_y["Donem"],
+                    "TUFE_Yillik": pd.to_numeric(df_y[val_col_y], errors="coerce"),
+                })
+        except Exception as e:
+            st.warning(f"Yıllık TÜFE verisi alınamadı: {e}")
 
-            df = pd.DataFrame(items)
-            
-            if "Tarih" not in df.columns:
-                continue
-
-            # Tarih parse etme (DayFirst=True önemli)
-            df["Tarih_dt"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
-            
-            # Eğer yukarıdaki çalışmazsa yedek (YYYY-MM)
-            if df["Tarih_dt"].isnull().all():
-                 df["Tarih_dt"] = pd.to_datetime(df["Tarih"], format="%Y-%m", errors="coerce")
-
-            df = df.dropna(subset=["Tarih_dt"]).sort_values("Tarih_dt")
-            df["Donem"] = df["Tarih_dt"].dt.strftime("%Y-%m")
-            
-            # Değer kolonunu bul (Tarih, UNIXTIME vb olmayan ilk kolon)
-            val_cols = [c for c in df.columns if c not in ["Tarih", "UNIXTIME", "Tarih_dt", "Donem"]]
-            if not val_cols:
-                continue
-            val_col = val_cols[0]
-
-            part = pd.DataFrame({
-                "Tarih": df["Tarih_dt"].dt.strftime("%d-%m-%Y"),
-                "Donem": df["Donem"],
-                out_col: pd.to_numeric(df[val_col], errors="coerce"),
-            })
-
-            results[out_col] = part
-
-        # İki tabloyu (Aylık ve Yıllık) birleştir
+        # Sonuçları birleştir
         df_monthly = results.get("TUFE_Aylik", pd.DataFrame())
         df_yearly = results.get("TUFE_Yillik", pd.DataFrame())
 
@@ -479,7 +471,7 @@ elif page == "📈 Piyasa Verileri (EVDS & BIS)":
 
     with st.sidebar:
         st.markdown("### 📅 Tarih Aralığı")
-        sd = st.date_input("Başlangıç", datetime.date(2025, 1, 1))
+        sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
         ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
 
         if EVDS_API_KEY:
@@ -573,96 +565,4 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
     st.header(f"➕ {page}")
     with st.container():
         with st.form("entry_form"):
-            c1, c2, c3 = st.columns([2, 1, 1])
-            with c1:
-                user, cat, disp = get_participant_selection()
-            with c2:
-                # Varsayılan olarak bugünün ayını seçmeye çalış
-                current_month = datetime.date.today().strftime("%Y-%m")
-                idx = tum_donemler.index(current_month) if current_month in tum_donemler else 0
-                donem = st.selectbox("Dönem", tum_donemler, index=idx)
-            with c3:
-                tarih = st.date_input("Tahmin Tarihi", datetime.date.today())
-
-            link = st.text_input("Link (Opsiyonel)")
-            st.markdown("---")
-            data = {}
-            kat_sayisi = 0
-
-            # PPK FORMU
-            if page == "PPK Girişi":
-                c1, c2 = st.columns(2)
-                st.caption("Örnek Aralık Girişi: 42-45 veya 42/45")
-                r1 = c1.text_input("PPK Faiz Aralığı", key="r1")
-                v1 = c1.number_input("PPK Faiz Medyan %", step=0.25)
-                
-                r2 = c2.text_input("Yıl Sonu Faiz Aralığı", key="r2")
-                v2 = c2.number_input("Yıl Sonu Faiz Medyan %", step=0.25)
-                
-                with st.expander("Gelişmiş / Min-Max Girişi"):
-                    ec1, ec2, ec3 = st.columns(3)
-                    mn1 = ec1.number_input("Min PPK", step=0.25)
-                    mx1 = ec1.number_input("Max PPK", step=0.25)
-                    mn2 = ec2.number_input("Min Yıl Sonu", step=0.25)
-                    mx2 = ec2.number_input("Max Yıl Sonu", step=0.25)
-                    kat_sayisi = ec3.number_input("Katılımcı Sayısı (N)", step=1)
-
-                # Parse işlemleri
-                md, mn, mx, ok = parse_range_input(r1, v1)
-                if ok: v1, mn1, mx1 = md, mn, mx
-                
-                md2, mn2_, mx2_, ok2 = parse_range_input(r2, v2)
-                if ok2: v2, mn2, mx2 = md2, mn2_, mx2_
-
-                data = {
-                    "tahmin_ppk_faiz": v1,
-                    "min_ppk_faiz": mn1,
-                    "max_ppk_faiz": mx1,
-                    "tahmin_yilsonu_faiz": v2,
-                    "min_yilsonu_faiz": mn2,
-                    "max_yilsonu_faiz": mx2,
-                }
-            
-            # ENFLASYON FORMU
-            else:
-                c1, c2, c3 = st.columns(3)
-                r1 = c1.text_input("Aylık Enflasyon Aralığı", key="r1")
-                v1 = c1.number_input("Aylık Medyan %", step=0.1)
-                
-                r2 = c2.text_input("Yıllık Enflasyon Aralığı", key="r2")
-                v2 = c2.number_input("Yıllık Medyan %", step=0.1)
-                
-                r3 = c3.text_input("Yıl Sonu Enflasyon Aralığı", key="r3")
-                v3 = c3.number_input("Yıl Sonu Medyan %", step=0.1)
-                
-                with st.expander("Gelişmiş / Min-Max Girişi"):
-                    ec1, ec2, ec3 = st.columns(3)
-                    mn1 = ec1.number_input("Min Aylık", step=0.1)
-                    mx1 = ec1.number_input("Max Aylık", step=0.1)
-                    mn2 = ec2.number_input("Min Yıllık", step=0.1)
-                    mx2 = ec2.number_input("Max Yıllık", step=0.1)
-                    mn3 = ec3.number_input("Min Yıl Sonu", step=0.1)
-                    mx3 = ec3.number_input("Max Yıl Sonu", step=0.1)
-                    kat_sayisi = st.number_input("Katılımcı Sayısı (N)", step=1)
-
-                md1, mn1_, mx1_, ok1 = parse_range_input(r1, v1)
-                if ok1: v1, mn1, mx1 = md1, mn1_, mx1_
-                md2, mn2_, mx2_, ok2 = parse_range_input(r2, v2)
-                if ok2: v2, mn2, mx2 = md2, mn2_, mx2_
-                md3, mn3_, mx3_, ok3 = parse_range_input(r3, v3)
-                if ok3: v3, mn3, mx3 = md3, mn3_, mx3_
-
-                data = {
-                    "tahmin_aylik_enf": v1, "min_aylik_enf": mn1, "max_aylik_enf": mx1,
-                    "tahmin_yillik_enf": v2, "min_yillik_enf": mn2, "max_yillik_enf": mx2,
-                    "tahmin_yilsonu_enf": v3, "min_yilsonu_enf": mn3, "max_yilsonu_enf": mx3,
-                }
-
-            data["katilimci_sayisi"] = int(kat_sayisi) if kat_sayisi and kat_sayisi > 0 else 0
-
-            if st.form_submit_button("✅ Kaydet"):
-                if user:
-                    upsert_tahmin(user, donem, cat, tarih, link, data)
-                    st.toast("Veri başarıyla kaydedildi!", icon="🎉")
-                else:
-                    st.error("Lütfen bir kullanıcı seçiniz.")
+            c1, c2, c3 = st.columns([2, 1, 1
