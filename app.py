@@ -6,12 +6,11 @@ import plotly.graph_objects as go
 import io
 import datetime
 import requests
+import numpy as np
 
-# --- İSTEĞE BAĞLI KÜTÜPHANE KONTROLÜ ---
+# --- OPSİYONEL KÜTÜPHANE KONTROLÜ ---
 try:
     from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
 except ImportError:
     pass
 
@@ -19,7 +18,7 @@ except ImportError:
 # 1) AYARLAR
 # =========================================================
 st.set_page_config(
-    page_title="Finansal Tahmin Terminali",
+    page_title="Ekonomi Tahmin Terminali",
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded",
@@ -53,12 +52,8 @@ except Exception as e:
 
 TABLE_TAHMIN = "tahminler4"
 TABLE_KATILIMCI = "katilimcilar"
-
 EVDS_BASE = "https://evds2.tcmb.gov.tr/service/evds"
-
-# --- DÜZELTİLEN KISIM BURASI ---
-# Hatalı olan 'TP.APIFON4-TP.FG.J0-3...' yerine sadece ana TÜFE kodu:
-EVDS_TUFE_SERIES = "TP.FG.J0"  
+EVDS_TUFE_SERIES = "TP.FG.J0"  # Doğru TÜFE Kodu
 
 # =========================================================
 # 3) YARDIMCI FONKSİYONLAR
@@ -72,12 +67,6 @@ tum_donemler = get_period_list()
 
 def normalize_name(name):
     return name.strip().title() if name else ""
-
-def safe_int(val):
-    try:
-        return int(float(val)) if pd.notnull(val) else 0
-    except Exception:
-        return 0
 
 def clean_and_sort_data(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -123,6 +112,8 @@ def parse_range_input(text_input, default_median=0.0):
 
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     date_str = forecast_date.strftime("%Y-%m-%d")
+    
+    # 1. Önce ID'yi kontrol et
     check_res = (
         supabase.table(TABLE_TAHMIN)
         .select("id")
@@ -133,23 +124,20 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     )
 
     clean_data = {k: (v if v != 0 else None) for k, v in data_dict.items()}
-    clean_data.update(
-        {
-            "kullanici_adi": user,
-            "donem": period,
-            "kategori": category,
-            "tahmin_tarihi": date_str,
-            "kaynak_link": link if link else None,
-        }
-    )
+    clean_data.update({
+        "kullanici_adi": user,
+        "donem": period,
+        "kategori": category,
+        "tahmin_tarihi": date_str,
+        "kaynak_link": link if link else None,
+    })
 
+    # 2. Varsa Update, Yoksa Insert
     if check_res.data:
         record_id = check_res.data[0]["id"]
         supabase.table(TABLE_TAHMIN).update(clean_data).eq("id", record_id).execute()
-        return "updated"
     else:
         supabase.table(TABLE_TAHMIN).insert(clean_data).execute()
-        return "inserted"
 
 def to_excel(df):
     output = io.BytesIO()
@@ -158,17 +146,12 @@ def to_excel(df):
     return output.getvalue()
 
 # =========================================================
-# 4) EVDS (TÜFE AYLIK+YILLIK) - DÜZELTİLMİŞ URL YAPISI
+# 4) EVDS & BIS (VERİ ÇEKME)
 # =========================================================
 def _evds_headers(api_key: str) -> dict:
-    return {
-        "key": api_key,
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json,text/plain,*/*",
-    }
+    return {"key": api_key, "User-Agent": "Mozilla/5.0"}
 
 def _evds_url_single(series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int | None) -> str:
-    # EVDS "DD-MM-YYYY" formatı ister
     s = start_date.strftime("%d-%m-%Y")
     e = end_date.strftime("%d-%m-%Y")
     url = f"{EVDS_BASE}/series={series_code}&startDate={s}&endDate={e}&type=json"
@@ -176,133 +159,82 @@ def _evds_url_single(series_code: str, start_date: datetime.date, end_date: date
         url += f"&formulas={int(formulas)}"
     return url
 
-def _evds_get_json(url: str, api_key: str, timeout: int = 25) -> dict:
-    r = requests.get(url, headers=_evds_headers(api_key), timeout=timeout)
-    # 200 harici her şey hata olarak ele alınır
-    if r.status_code != 200:
-        raise requests.HTTPError(f"EVDS Hatası (Kod: {r.status_code})")
-    return r.json()
-
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
-    """
-    Sadece 'TP.FG.J0' (TÜFE Genel) serisi kullanılır.
-    formulas=1 -> Aylık Değişim
-    formulas=2 -> Yıllık Değişim
-    """
     if not api_key:
-        return pd.DataFrame(), "EVDS_KEY eksik (secrets.toml)"
-
+        return pd.DataFrame(), "EVDS_KEY eksik."
     try:
         results = {}
-        # 1: Aylık, 2: Yıllık
         for formulas, out_col in [(1, "TUFE_Aylik"), (2, "TUFE_Yillik")]:
             url = _evds_url_single(EVDS_TUFE_SERIES, start_date, end_date, formulas=formulas)
-            js = _evds_get_json(url, api_key)
+            r = requests.get(url, headers=_evds_headers(api_key), timeout=25)
+            if r.status_code != 200: continue
+            
+            js = r.json()
             items = js.get("items", [])
+            if not items: continue
             
-            if not items:
-                continue
-
             df = pd.DataFrame(items)
+            if "Tarih" not in df.columns: continue
             
-            if "Tarih" not in df.columns:
-                continue
-
-            # Tarih parse etme (DayFirst=True önemli)
+            # Tarih düzeltme
             df["Tarih_dt"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
-            
-            # Eğer yukarıdaki çalışmazsa yedek (YYYY-MM)
             if df["Tarih_dt"].isnull().all():
                  df["Tarih_dt"] = pd.to_datetime(df["Tarih"], format="%Y-%m", errors="coerce")
-
+            
             df = df.dropna(subset=["Tarih_dt"]).sort_values("Tarih_dt")
             df["Donem"] = df["Tarih_dt"].dt.strftime("%Y-%m")
             
-            # Değer kolonunu bul (Tarih, UNIXTIME vb olmayan ilk kolon)
             val_cols = [c for c in df.columns if c not in ["Tarih", "UNIXTIME", "Tarih_dt", "Donem"]]
-            if not val_cols:
-                continue
-            val_col = val_cols[0]
-
+            if not val_cols: continue
+            
             part = pd.DataFrame({
                 "Tarih": df["Tarih_dt"].dt.strftime("%d-%m-%Y"),
                 "Donem": df["Donem"],
-                out_col: pd.to_numeric(df[val_col], errors="coerce"),
+                out_col: pd.to_numeric(df[val_cols[0]], errors="coerce"),
             })
-
             results[out_col] = part
 
-        # İki tabloyu (Aylık ve Yıllık) birleştir
-        df_monthly = results.get("TUFE_Aylik", pd.DataFrame())
-        df_yearly = results.get("TUFE_Yillik", pd.DataFrame())
-
-        if df_monthly.empty and df_yearly.empty:
-            return pd.DataFrame(), "Seçilen tarih aralığında EVDS verisi bulunamadı."
+        df_m = results.get("TUFE_Aylik", pd.DataFrame())
+        df_y = results.get("TUFE_Yillik", pd.DataFrame())
         
-        if df_monthly.empty:
-            out = df_yearly
-        elif df_yearly.empty:
-            out = df_monthly
-        else:
-            out = pd.merge(df_monthly, df_yearly, on=["Tarih", "Donem"], how="outer")
-
-        out = out.sort_values(["Donem", "Tarih"]).reset_index(drop=True)
-        return out, None
-
+        if df_m.empty and df_y.empty: return pd.DataFrame(), "Veri bulunamadı."
+        if df_m.empty: out = df_y
+        elif df_y.empty: out = df_m
+        else: out = pd.merge(df_m, df_y, on=["Tarih", "Donem"], how="outer")
+        
+        return out.sort_values(["Donem", "Tarih"]), None
     except Exception as e:
-        return pd.DataFrame(), f"EVDS İşlem Hatası: {e}"
+        return pd.DataFrame(), str(e)
 
-
-# =========================================================
-# 5) BIS (REPO/POLICY RATE)
-# =========================================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def fetch_bis_cbpol_tr(start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
-    """
-    BIS: WS_CBPOL / D.TR (policy rate)
-    """
     try:
         s = start_date.strftime("%Y-%m-%d")
         e = end_date.strftime("%Y-%m-%d")
         url = f"https://stats.bis.org/api/v1/data/WS_CBPOL/D.TR?format=csv&startPeriod={s}&endPeriod={e}"
-
         r = requests.get(url, timeout=25)
-        if r.status_code >= 400:
-            return pd.DataFrame(), f"BIS HTTP Hatası: {r.status_code}"
-
-        content = r.content.decode("utf-8", errors="ignore")
-        if not content.strip():
-             return pd.DataFrame(), "BIS boş veri döndü."
-
-        # CSV'yi oku
-        df = pd.read_csv(io.StringIO(content))
+        if r.status_code >= 400: return pd.DataFrame(), f"BIS HTTP {r.status_code}"
         
-        # Kolon isimlerini standartlaştır
+        content = r.content.decode("utf-8", errors="ignore")
+        if not content.strip(): return pd.DataFrame(), "Boş veri"
+        
+        df = pd.read_csv(io.StringIO(content))
         df.columns = [c.strip().upper() for c in df.columns]
-
-        # Gerekli kolonlar var mı?
-        if "TIME_PERIOD" not in df.columns or "OBS_VALUE" not in df.columns:
-            return pd.DataFrame(), f"BIS kolon hatası. Gelen kolonlar: {list(df.columns)}"
-
+        if "TIME_PERIOD" not in df.columns: return pd.DataFrame(), "Kolon hatası"
+        
         out = df[["TIME_PERIOD", "OBS_VALUE"]].copy()
         out["TIME_PERIOD"] = pd.to_datetime(out["TIME_PERIOD"], errors="coerce")
         out = out.dropna(subset=["TIME_PERIOD"])
-        
         out["Donem"] = out["TIME_PERIOD"].dt.strftime("%Y-%m")
         out["Tarih"] = out["TIME_PERIOD"].dt.strftime("%d-%m-%Y")
         out["REPO_RATE"] = pd.to_numeric(out["OBS_VALUE"], errors="coerce")
-        
-        out = out[["Tarih", "Donem", "REPO_RATE"]].sort_values(["Donem", "Tarih"]).reset_index(drop=True)
-
-        return out, None
-
+        return out[["Tarih", "Donem", "REPO_RATE"]].sort_values(["Donem", "Tarih"]), None
     except Exception as e:
-        return pd.DataFrame(), f"BIS Hatası: {e}"
-
+        return pd.DataFrame(), str(e)
 
 # =========================================================
-# 6) AUTH (GİRİŞ)
+# 5) AUTH
 # =========================================================
 if "giris_yapildi" not in st.session_state:
     st.session_state["giris_yapildi"] = False
@@ -321,348 +253,268 @@ if not st.session_state["giris_yapildi"]:
         st.stop()
 
 # =========================================================
-# 7) SIDEBAR MENÜ
+# 6) SIDEBAR
 # =========================================================
 with st.sidebar:
     st.title("📊 Menü")
-    page = st.radio(
-        "Git:",
-        [
-            "Dashboard",
-            "📈 Piyasa Verileri (EVDS & BIS)",
-            "PPK Girişi",
-            "Enflasyon Girişi",
-            "Katılımcı Yönetimi",
-        ],
-    )
-
-# Katılımcı seçim yardımcı fonksiyonu
-def get_participant_selection():
-    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
-    df = pd.DataFrame(res.data)
-    if df.empty:
-        st.error("Lütfen önce Katılımcı ekleyin.")
-        return None, None, None
-    df["disp"] = df.apply(
-        lambda x: f"{x['ad_soyad']} ({x['anket_kaynagi']})" if x.get("anket_kaynagi") else x["ad_soyad"],
-        axis=1,
-    )
-    name_map = dict(zip(df["disp"], df["ad_soyad"]))
-    sel = st.selectbox("Katılımcı Seç", df["disp"].unique())
-    row = df[df["ad_soyad"] == name_map[sel]].iloc[0]
-    return name_map[sel], row.get("kategori", "Bireysel"), sel
-
+    page = st.radio("Git:", [
+        "Dashboard", 
+        "📈 Piyasa Verileri", 
+        "PPK Girişi", 
+        "Enflasyon Girişi", 
+        "Katılımcı Yönetimi"
+    ])
 
 # =========================================================
-# SAYFA: DASHBOARD
+# SAYFA: DASHBOARD (DÜZELTİLMİŞ & GELİŞMİŞ)
 # =========================================================
 if page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
 
+    # 1. Verileri Çek
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
-
-    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi", "kategori").execute()
+    
+    # Kategori bilgisini garanti almak için select("*") yapıyoruz
+    res_k = supabase.table(TABLE_KATILIMCI).select("*").execute()
     df_k = pd.DataFrame(res_k.data)
 
     if df_t.empty or df_k.empty:
-        st.info("Henüz veri girişi yapılmamış.")
+        st.info("Henüz yeterli veri girişi yok.")
         st.stop()
 
+    # 2. Veri Temizliği
     df_t = clean_and_sort_data(df_t)
-    df_t["tahmin_tarihi"] = pd.to_datetime(df_t["tahmin_tarihi"], errors="coerce")
-    df_t = df_t.sort_values(by="tahmin_tarihi")
+    
+    # 3. Merge İşlemi (KeyError'u önleyen sağlam yapı)
+    # Kolon isimlerini garantiye alalım
+    if "ad_soyad" in df_k.columns:
+        df_k = df_k.rename(columns={"ad_soyad": "kullanici_adi_key"})
+    
+    # Merge
+    df_merged = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="kullanici_adi_key", how="left")
+    
+    # KeyError Çözümü: Kolonlar oluşmadıysa manuel oluştur
+    if "kategori" not in df_merged.columns:
+        df_merged["kategori"] = "Bireysel"
+    if "anket_kaynagi" not in df_merged.columns:
+        df_merged["anket_kaynagi"] = "-"
+        
+    # Eksik verileri doldur
+    df_merged["kategori"] = df_merged["kategori"].fillna("Bireysel")
+    df_merged["anket_kaynagi"] = df_merged["anket_kaynagi"].fillna("-")
+    
+    # Görinen İsim Oluşturma
+    df_merged["gorunen_isim"] = df_merged.apply(
+        lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" 
+        if x['anket_kaynagi'] not in ["-", None, ""] else x['kullanici_adi'], 
+        axis=1
+    )
+    
+    df_merged["yil"] = df_merged["donem"].apply(lambda x: str(x).split("-")[0])
 
-    df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
-    df_latest_raw = df_t.drop_duplicates(subset=["kullanici_adi", "donem"], keep="last")
-    df_latest = pd.merge(df_latest_raw, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+    # En güncel tahminleri bul
+    df_latest = df_merged.sort_values("tahmin_tarihi").drop_duplicates(subset=["kullanici_adi", "donem"], keep="last")
 
-    for d in [df_history, df_latest]:
-        d["gorunen_isim"] = d.apply(
-            lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})"
-            if pd.notnull(x["anket_kaynagi"]) and x["anket_kaynagi"] != ""
-            else x["kullanici_adi"],
-            axis=1,
-        )
-        d["hover_text"] = d.apply(
-            lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}"
-            if pd.notnull(x.get("katilimci_sayisi")) and pd.notnull(x.get("tahmin_tarihi"))
-            else "",
-            axis=1,
-        )
-        d["kategori"] = d["kategori"].fillna("Bireysel")
-        d["anket_kaynagi"] = d["anket_kaynagi"].fillna("-")
-        d["yil"] = d["donem"].apply(lambda x: str(x).split("-")[0] if isinstance(x, str) else "")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Toplam Katılımcı", df_latest["kullanici_adi"].nunique())
-    c2.metric("Güncel Tahmin Sayısı", len(df_latest))
-    last_dt = df_latest["tahmin_tarihi"].max()
-    c3.metric("Son Güncelleme", last_dt.strftime("%d.%m.%Y") if pd.notnull(last_dt) else "-")
+    # --- ÜST METRİKLER ---
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Toplam Katılımcı", df_latest["kullanici_adi"].nunique())
+    m2.metric("Toplam Tahmin", len(df_latest))
+    
+    avg_ppk = df_latest[df_latest["donem"] == "2025-01"]["tahmin_ppk_faiz"].median()
+    m3.metric("Ocak '25 PPK Medyan", f"%{avg_ppk}" if pd.notnull(avg_ppk) else "-")
+    
+    avg_inf = df_latest[df_latest["donem"] == "2025-01"]["tahmin_aylik_enf"].median()
+    m4.metric("Ocak '25 Enflasyon Medyan", f"%{avg_inf}" if pd.notnull(avg_inf) else "-")
+    
     st.markdown("---")
 
+    # --- FİLTRELER ---
     with st.sidebar:
         st.markdown("### 🔍 Filtreler")
-        x_axis_mode = st.radio("X Ekseni", ["📅 Hedef Dönem", "⏳ Tahmin Tarihi"])
+        param_type = st.selectbox("Analiz Parametresi", [
+            "tahmin_ppk_faiz", "tahmin_yilsonu_faiz", 
+            "tahmin_aylik_enf", "tahmin_yilsonu_enf"
+        ], format_func=lambda x: x.replace("tahmin_", "").replace("_", " ").upper())
         
-        # Filtre mantığı
-        all_cats = sorted(df_latest["kategori"].unique())
-        cat_filter = st.multiselect("Kategori", all_cats, default=all_cats)
+        cats = st.multiselect("Kategori", sorted(df_latest["kategori"].unique()), default=sorted(df_latest["kategori"].unique()))
         
-        subset_cat = df_latest[df_latest["kategori"].isin(cat_filter)]
-        avail_src = sorted(subset_cat["anket_kaynagi"].astype(str).unique())
-        src_filter = st.multiselect("Kaynak", avail_src, default=avail_src)
+        # Filtreli veri
+        df_filtered = df_latest[df_latest["kategori"].isin(cats)]
         
-        subset_src = subset_cat[subset_cat["anket_kaynagi"].astype(str).isin(src_filter)]
-        avail_usr = sorted(subset_src["gorunen_isim"].unique())
-        usr_filter = st.multiselect("Katılımcı", avail_usr, default=avail_usr)
+        users = st.multiselect("Katılımcılar", sorted(df_filtered["gorunen_isim"].unique()), default=sorted(df_filtered["gorunen_isim"].unique()))
         
-        avail_yrs = sorted(subset_src["yil"].unique())
-        yr_filter = st.multiselect("Yıl", avail_yrs, default=avail_yrs)
+        target_df = df_filtered[df_filtered["gorunen_isim"].isin(users)].copy()
 
-    is_single_user = len(usr_filter) == 1
-
-    if is_single_user:
-        target_df = df_history[df_history["gorunen_isim"].isin(usr_filter) & df_history["yil"].isin(yr_filter)].copy()
-        x_axis_col = "tahmin_tarihi"
-        sort_col = "tahmin_tarihi"
-        tick_format = "%d-%m-%Y"
-    else:
-        target_df = df_latest[
-            df_latest["kategori"].isin(cat_filter)
-            & df_latest["anket_kaynagi"].isin(src_filter)
-            & df_latest["gorunen_isim"].isin(usr_filter)
-            & df_latest["yil"].isin(yr_filter)
-        ].copy()
-        x_axis_col = "donem"
-        sort_col = "donem_date"
-        tick_format = None
-
-    if target_df.empty:
-        st.warning("Seçilen filtrelere uygun veri yok.")
-        st.stop()
-
-    def plot(y, min_c, max_c, tit):
-        chart_data = target_df.sort_values(sort_col)
-        # Verisi olmayan kolonları çizdirmemek için kontrol
-        if chart_data[y].isnull().all():
-            st.info(f"{tit} için veri yok.")
-            return
-
-        fig = px.line(
-            chart_data,
-            x=x_axis_col,
-            y=y,
-            color="gorunen_isim" if not is_single_user else "donem",
+    # --- GRAFİK 1: ZAMAN SERİSİ (TREND) ---
+    st.subheader("📈 Tahmin Trendleri")
+    if not target_df.empty:
+        fig_line = px.line(
+            target_df.sort_values("donem_date"),
+            x="donem", 
+            y=param_type, 
+            color="gorunen_isim",
             markers=True,
-            title=tit,
-            hover_data=["hover_text"],
+            title=f"{param_type.replace('_', ' ').title()} - Dönemsel Değişim",
+            hover_data=["tahmin_tarihi"]
         )
-        if tick_format:
-            fig.update_xaxes(tickformat=tick_format)
+        st.plotly_chart(fig_line, use_container_width=True)
+    else:
+        st.warning("Seçilen kriterlere uygun veri yok.")
 
-        st.plotly_chart(fig, use_container_width=True)
+    # --- GRAFİK 2: ISI HARİTASI (HEATMAP) - GERİ GELDİ! ---
+    st.subheader("🔥 Tahmin Isı Haritası")
+    if not target_df.empty:
+        try:
+            # Pivot table: Satırlar=Katılımcı, Sütunlar=Dönem, Değer=Tahmin
+            pivot_df = target_df.pivot_table(index="gorunen_isim", columns="donem", values=param_type)
+            
+            fig_heat = px.imshow(
+                pivot_df,
+                labels=dict(x="Dönem", y="Katılımcı", color="Değer"),
+                x=pivot_df.columns,
+                y=pivot_df.index,
+                aspect="auto",
+                color_continuous_scale="RdBu_r",
+                text_auto=".2f",
+                title=f"{param_type} Isı Haritası"
+            )
+            fig_heat.update_xaxes(side="top")
+            st.plotly_chart(fig_heat, use_container_width=True)
+        except Exception as e:
+            st.error(f"Isı haritası oluşturulamadı: {e}")
 
+    # --- GRAFİK 3: DAĞILIM (BOXPLOT) - YENİ! ---
     c1, c2 = st.columns(2)
     with c1:
-        plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Faiz Tahmini")
+        st.subheader("📦 Tahmin Dağılımı (Boxplot)")
+        if not target_df.empty:
+            fig_box = px.box(
+                target_df, 
+                x="donem", 
+                y=param_type, 
+                points="all",
+                color="donem",
+                title="Dönem Bazlı Tahmin Dağılımı"
+            )
+            st.plotly_chart(fig_box, use_container_width=True)
+
+    # --- GRAFİK 4: SON DURUM BAR ---
     with c2:
-        plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enflasyon Tahmini")
-
+        st.subheader("📊 Son Dönem Karşılaştırma")
+        last_period = target_df["donem"].max()
+        df_last_p = target_df[target_df["donem"] == last_period]
+        
+        if not df_last_p.empty:
+            fig_bar = px.bar(
+                df_last_p.sort_values(param_type),
+                x="gorunen_isim",
+                y=param_type,
+                color="kategori",
+                text_auto=".2f",
+                title=f"{last_period} Dönemi İçin Tahminler"
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
 
 # =========================================================
-# SAYFA: PIYASA VERILERI (EVDS + BIS)
+# SAYFA: PİYASA VERİLERİ (EVDS + BIS)
 # =========================================================
-elif page == "📈 Piyasa Verileri (EVDS & BIS)":
-    st.header("📈 Gerçekleşen Piyasa Verileri")
-    st.info("Enflasyon verisi TCMB EVDS'den, Politika Faizi BIS veritabanından çekilmektedir.")
-
+elif page == "📈 Piyasa Verileri":
+    st.header("📈 Gerçekleşen Veriler (EVDS & BIS)")
+    
     with st.sidebar:
-        st.markdown("### 📅 Tarih Aralığı")
         sd = st.date_input("Başlangıç", datetime.date(2025, 1, 1))
         ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
 
-        if EVDS_API_KEY:
-            st.markdown("---")
-            st.caption("EVDS Bağlantısı: Aktif ✅")
-
-    # 1. EVDS: ENFLASYON
-    st.subheader("1. Enflasyon (TÜFE - Kaynak: EVDS)")
-    if not EVDS_API_KEY:
-        st.error("EVDS API Anahtarı bulunamadı (secrets.toml dosyasını kontrol edin).")
-        df_evds = pd.DataFrame()
+    # EVDS
+    st.subheader("TÜFE Enflasyonu (TCMB)")
+    if EVDS_API_KEY:
+        with st.spinner("EVDS verisi çekiliyor..."):
+            df_evds, err = fetch_evds_tufe_monthly_yearly(EVDS_API_KEY, sd, ed)
+        if err: st.error(err)
+        elif not df_evds.empty:
+            st.dataframe(df_evds, use_container_width=True)
+            fig = go.Figure()
+            if "TUFE_Aylik" in df_evds.columns:
+                fig.add_trace(go.Scatter(x=df_evds["Tarih"], y=df_evds["TUFE_Aylik"], name="Aylık %"))
+            if "TUFE_Yillik" in df_evds.columns:
+                fig.add_trace(go.Scatter(x=df_evds["Tarih"], y=df_evds["TUFE_Yillik"], name="Yıllık %", line=dict(dash='dot')))
+            st.plotly_chart(fig, use_container_width=True)
     else:
-        with st.spinner("TCMB EVDS'den veri çekiliyor..."):
-            df_evds, err_evds = fetch_evds_tufe_monthly_yearly(EVDS_API_KEY, sd, ed)
-        
-        if err_evds:
-            st.error(err_evds)
-
-    if df_evds is not None and not df_evds.empty:
-        st.dataframe(df_evds, use_container_width=True, height=300)
-        st.download_button("📥 Enflasyon Verisini İndir (Excel)", to_excel(df_evds), "EVDS_ENFLASYON.xlsx", type="primary")
-
-        fig = go.Figure()
-        if "TUFE_Aylik" in df_evds.columns:
-            fig.add_trace(go.Scatter(x=df_evds["Tarih"], y=df_evds["TUFE_Aylik"], mode="lines+markers", name="Aylık Enflasyon (%)"))
-        if "TUFE_Yillik" in df_evds.columns:
-            fig.add_trace(go.Scatter(x=df_evds["Tarih"], y=df_evds["TUFE_Yillik"], mode="lines+markers", name="Yıllık Enflasyon (%)", line=dict(dash='dot', color='firebrick')))
-        
-        fig.update_layout(title="TÜFE Enflasyon Oranları", xaxis_title="Tarih", yaxis_title="Oran (%)", hovermode="x unified")
-        st.plotly_chart(fig, use_container_width=True)
+        st.warning("EVDS API Key girilmemiş.")
 
     st.markdown("---")
 
-    # 2. BIS: POLİTİKA FAİZİ
-    st.subheader("2. Politika Faizi (Repo - Kaynak: BIS)")
-    with st.spinner("BIS Veritabanından veri çekiliyor..."):
+    # BIS
+    st.subheader("Politika Faizi (BIS)")
+    with st.spinner("BIS verisi çekiliyor..."):
         df_bis, err_bis = fetch_bis_cbpol_tr(sd, ed)
-    
-    if err_bis:
-        st.error(err_bis)
-
-    if not df_bis.empty:
-        st.dataframe(df_bis, use_container_width=True, height=300)
-        st.download_button("📥 Faiz Verisini İndir (Excel)", to_excel(df_bis), "BIS_FAIZ_TR.xlsx", type="primary")
-        
+    if err_bis: st.error(err_bis)
+    elif not df_bis.empty:
+        st.dataframe(df_bis, use_container_width=True)
         fig2 = px.line(df_bis, x="Tarih", y="REPO_RATE", markers=True, title="TCMB Politika Faizi")
-        fig2.update_traces(line_color='#1E88E5', line_width=3)
         st.plotly_chart(fig2, use_container_width=True)
 
-
 # =========================================================
-# SAYFA: KATILIMCI YÖNETİMİ
+# SAYFA: DİĞERLERİ (KATILIMCI & GİRİŞ)
 # =========================================================
 elif page == "Katılımcı Yönetimi":
     st.header("👥 Katılımcı Yönetimi")
-    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
-        with st.form("new_kat"):
-            c1, c2 = st.columns(2)
-            ad = c1.text_input("Ad / Kurum")
-            cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
-            src = st.text_input("Kaynak (Opsiyonel)")
-            if st.form_submit_button("Ekle"):
-                if ad:
-                    try:
-                        supabase.table(TABLE_KATILIMCI).insert(
-                            {"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}
-                        ).execute()
-                        st.toast("Kişi başarıyla eklendi.")
-                    except Exception as e:
-                        st.error(f"Ekleme hatası: {e}")
+    with st.expander("➕ Yeni Ekle"):
+        with st.form("add_p"):
+            c1,c2 = st.columns(2)
+            ad = c1.text_input("Ad")
+            cat = c2.radio("Tip", ["Bireysel","Kurumsal"])
+            src = st.text_input("Kaynak")
+            if st.form_submit_button("Ekle") and ad:
+                supabase.table(TABLE_KATILIMCI).insert({"ad_soyad":normalize_name(ad),"kategori":cat,"anket_kaynagi":src or None}).execute()
+                st.success("Eklendi")
 
-    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    res = supabase.table(TABLE_KATILIMCI).select("*").execute()
     df = pd.DataFrame(res.data)
     if not df.empty:
         st.dataframe(df, use_container_width=True)
-        ks = st.selectbox("Silinecek Kişi Seçin", df["ad_soyad"].unique())
-        if st.button("🚫 Seçili Kişiyi ve Verilerini Sil"):
-            try:
-                supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
-                supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
-                st.success("Silindi!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Silme hatası: {e}")
+        to_del = st.selectbox("Sil", df["ad_soyad"].unique())
+        if st.button("Sil"):
+            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi",to_del).execute()
+            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad",to_del).execute()
+            st.rerun()
 
-
-# =========================================================
-# SAYFA: VERİ GİRİŞİ
-# =========================================================
 elif page in ["PPK Girişi", "Enflasyon Girişi"]:
-    st.header(f"➕ {page}")
-    with st.container():
-        with st.form("entry_form"):
-            c1, c2, c3 = st.columns([2, 1, 1])
-            with c1:
-                user, cat, disp = get_participant_selection()
-            with c2:
-                # Varsayılan olarak bugünün ayını seçmeye çalış
-                current_month = datetime.date.today().strftime("%Y-%m")
-                idx = tum_donemler.index(current_month) if current_month in tum_donemler else 0
-                donem = st.selectbox("Dönem", tum_donemler, index=idx)
-            with c3:
-                tarih = st.date_input("Tahmin Tarihi", datetime.date.today())
-
-            link = st.text_input("Link (Opsiyonel)")
-            st.markdown("---")
-            data = {}
-            kat_sayisi = 0
-
-            # PPK FORMU
-            if page == "PPK Girişi":
-                c1, c2 = st.columns(2)
-                st.caption("Örnek Aralık Girişi: 42-45 veya 42/45")
-                r1 = c1.text_input("PPK Faiz Aralığı", key="r1")
-                v1 = c1.number_input("PPK Faiz Medyan %", step=0.25)
-                
-                r2 = c2.text_input("Yıl Sonu Faiz Aralığı", key="r2")
-                v2 = c2.number_input("Yıl Sonu Faiz Medyan %", step=0.25)
-                
-                with st.expander("Gelişmiş / Min-Max Girişi"):
-                    ec1, ec2, ec3 = st.columns(3)
-                    mn1 = ec1.number_input("Min PPK", step=0.25)
-                    mx1 = ec1.number_input("Max PPK", step=0.25)
-                    mn2 = ec2.number_input("Min Yıl Sonu", step=0.25)
-                    mx2 = ec2.number_input("Max Yıl Sonu", step=0.25)
-                    kat_sayisi = ec3.number_input("Katılımcı Sayısı (N)", step=1)
-
-                # Parse işlemleri
-                md, mn, mx, ok = parse_range_input(r1, v1)
-                if ok: v1, mn1, mx1 = md, mn, mx
-                
-                md2, mn2_, mx2_, ok2 = parse_range_input(r2, v2)
-                if ok2: v2, mn2, mx2 = md2, mn2_, mx2_
-
-                data = {
-                    "tahmin_ppk_faiz": v1,
-                    "min_ppk_faiz": mn1,
-                    "max_ppk_faiz": mx1,
-                    "tahmin_yilsonu_faiz": v2,
-                    "min_yilsonu_faiz": mn2,
-                    "max_yilsonu_faiz": mx2,
-                }
+    st.header(f"📝 {page}")
+    
+    # Katılımcı Seçimi
+    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
+    df_users = pd.DataFrame(res.data)
+    if df_users.empty:
+        st.error("Önce katılımcı ekleyin.")
+        st.stop()
+        
+    df_users["disp"] = df_users.apply(lambda x: f"{x['ad_soyad']} ({x['anket_kaynagi']})" if x['anket_kaynagi'] else x['ad_soyad'], axis=1)
+    
+    with st.form("entry"):
+        c1, c2, c3 = st.columns(3)
+        sel_u = c1.selectbox("Katılımcı", df_users["disp"].unique())
+        real_u = df_users[df_users["disp"]==sel_u].iloc[0]["ad_soyad"]
+        cat_u = df_users[df_users["disp"]==sel_u].iloc[0]["kategori"]
+        
+        donem = c2.selectbox("Dönem", tum_donemler)
+        tarih = c3.date_input("Tarih", datetime.date.today())
+        link = st.text_input("Link")
+        
+        data = {}
+        if page == "PPK Girişi":
+            col1, col2 = st.columns(2)
+            v1 = col1.number_input("PPK Tahmin %", step=0.25)
+            v2 = col2.number_input("Yıl Sonu Faiz %", step=0.25)
+            data = {"tahmin_ppk_faiz":v1, "tahmin_yilsonu_faiz":v2}
+        else:
+            c1,c2,c3 = st.columns(3)
+            v1 = c1.number_input("Aylık Enf %", step=0.1)
+            v2 = c2.number_input("Yıllık Enf %", step=0.1)
+            v3 = c3.number_input("Yıl Sonu Enf %", step=0.1)
+            data = {"tahmin_aylik_enf":v1, "tahmin_yillik_enf":v2, "tahmin_yilsonu_enf":v3}
             
-            # ENFLASYON FORMU
-            else:
-                c1, c2, c3 = st.columns(3)
-                r1 = c1.text_input("Aylık Enflasyon Aralığı", key="r1")
-                v1 = c1.number_input("Aylık Medyan %", step=0.1)
-                
-                r2 = c2.text_input("Yıllık Enflasyon Aralığı", key="r2")
-                v2 = c2.number_input("Yıllık Medyan %", step=0.1)
-                
-                r3 = c3.text_input("Yıl Sonu Enflasyon Aralığı", key="r3")
-                v3 = c3.number_input("Yıl Sonu Medyan %", step=0.1)
-                
-                with st.expander("Gelişmiş / Min-Max Girişi"):
-                    ec1, ec2, ec3 = st.columns(3)
-                    mn1 = ec1.number_input("Min Aylık", step=0.1)
-                    mx1 = ec1.number_input("Max Aylık", step=0.1)
-                    mn2 = ec2.number_input("Min Yıllık", step=0.1)
-                    mx2 = ec2.number_input("Max Yıllık", step=0.1)
-                    mn3 = ec3.number_input("Min Yıl Sonu", step=0.1)
-                    mx3 = ec3.number_input("Max Yıl Sonu", step=0.1)
-                    kat_sayisi = st.number_input("Katılımcı Sayısı (N)", step=1)
-
-                md1, mn1_, mx1_, ok1 = parse_range_input(r1, v1)
-                if ok1: v1, mn1, mx1 = md1, mn1_, mx1_
-                md2, mn2_, mx2_, ok2 = parse_range_input(r2, v2)
-                if ok2: v2, mn2, mx2 = md2, mn2_, mx2_
-                md3, mn3_, mx3_, ok3 = parse_range_input(r3, v3)
-                if ok3: v3, mn3, mx3 = md3, mn3_, mx3_
-
-                data = {
-                    "tahmin_aylik_enf": v1, "min_aylik_enf": mn1, "max_aylik_enf": mx1,
-                    "tahmin_yillik_enf": v2, "min_yillik_enf": mn2, "max_yillik_enf": mx2,
-                    "tahmin_yilsonu_enf": v3, "min_yilsonu_enf": mn3, "max_yilsonu_enf": mx3,
-                }
-
-            data["katilimci_sayisi"] = int(kat_sayisi) if kat_sayisi and kat_sayisi > 0 else 0
-
-            if st.form_submit_button("✅ Kaydet"):
-                if user:
-                    upsert_tahmin(user, donem, cat, tarih, link, data)
-                    st.toast("Veri başarıyla kaydedildi!", icon="🎉")
-                else:
-                    st.error("Lütfen bir kullanıcı seçiniz.")
+        if st.form_submit_button("Kaydet"):
+            upsert_tahmin(real_u, donem, cat_u, tarih, link, data)
+            st.success("Kaydedildi!")
