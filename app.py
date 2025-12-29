@@ -19,14 +19,8 @@ try:
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 except ImportError:
-    st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter evds")
+    st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter requests")
     st.stop()
-
-# EVDS Kütüphanesi
-try:
-    import evds
-except ImportError:
-    evds = None
 
 # --- 1. AYARLAR VE TASARIM ---
 st.set_page_config(page_title="Finansal Tahmin Terminali", layout="wide", page_icon="📊", initial_sidebar_state="expanded")
@@ -38,7 +32,6 @@ try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
-    # EVDS Anahtarı (Hata yönetimi için try-except içinde kullanacağız)
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
     
     supabase: Client = create_client(url, key)
@@ -48,6 +41,8 @@ except Exception as e:
 
 TABLE_TAHMIN = "tahminler4"
 TABLE_KATILIMCI = "katilimcilar"
+EVDS_BASE = "https://evds2.tcmb.gov.tr/service/evds"
+EVDS_TUFE_SERIES = "TP.FG.J0"  # TÜFE Serisi
 
 # --- YARDIMCI FONKSİYONLAR ---
 def get_period_list():
@@ -110,51 +105,142 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- SADECE EVDS VERİ ÇEKME FONKSİYONU ---
-@st.cache_data(ttl=300) # 5 dk cache
-def fetch_evds_data(api_key, start_date_obj, end_date_obj):
-    """
-    Sadece EVDS'den veri çeker.
-    Hata alırsa boş DataFrame ve hata mesajı döner.
-    """
+# =========================================================
+# YENİ VERİ ÇEKME MOTORU (REQUESTS TABANLI)
+# =========================================================
+
+def _evds_headers(api_key: str) -> dict:
+    return {"key": api_key, "User-Agent": "Mozilla/5.0"}
+
+def _evds_url_single(series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int | None) -> str:
+    s = start_date.strftime("%d-%m-%Y")
+    e = end_date.strftime("%d-%m-%Y")
+    url = f"{EVDS_BASE}/series={series_code}&startDate={s}&endDate={e}&type=json"
+    if formulas is not None:
+        url += f"&formulas={int(formulas)}"
+    return url
+
+@st.cache_data(ttl=600)
+def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
     if not api_key:
-        return pd.DataFrame(), "API Anahtarı Eksik (secrets.toml)"
-    
-    if not evds:
-        return pd.DataFrame(), "evds kütüphanesi yüklü değil"
-
+        return pd.DataFrame(), "EVDS_KEY eksik."
     try:
-        ev = evds.evdsAPI(api_key)
-        s_str = start_date_obj.strftime("%d-%m-%Y")
-        e_str = end_date_obj.strftime("%d-%m-%Y")
-        
-        # Veri Çekme
-        data = ev.get_data(['TP.PT.POL', 'TP.TUFE1YI.AY.O', 'TP.TUFE1YI.YI.O'], startdate=s_str, enddate=e_str)
-        
-        if data is None or data.empty:
-             return pd.DataFrame(), "Veri bulunamadı veya API hatası"
-
-        # Veri İşleme
-        clean_rows = []
-        for _, row in data.iterrows():
-            if pd.isna(row.get('Tarih')): continue
-            try:
-                dt = pd.to_datetime(row['Tarih'])
-                donem_fmt = dt.strftime('%Y-%m')
-            except: continue
-
-            clean_rows.append({
-                'Tarih': row['Tarih'],
-                'Donem': donem_fmt,
-                'PPK Faizi': float(row['TP_PT_POL']) if pd.notnull(row.get('TP_PT_POL')) else None,
-                'Aylık TÜFE': float(row['TP_TUFE1YI_AY_O']) if pd.notnull(row.get('TP_TUFE1YI_AY_O')) else None,
-                'Yıllık TÜFE': float(row['TP_TUFE1YI_YI_O']) if pd.notnull(row.get('TP_TUFE1YI_YI_O')) else None
-            })
+        results = {}
+        # formulas=1 (Aylık), formulas=2 (Yıllık)
+        for formulas, out_col in [(1, "TUFE_Aylik"), (2, "TUFE_Yillik")]:
+            url = _evds_url_single(EVDS_TUFE_SERIES, start_date, end_date, formulas=formulas)
+            r = requests.get(url, headers=_evds_headers(api_key), timeout=25)
+            if r.status_code != 200: continue
             
-        return pd.DataFrame(clean_rows), None # Hata yok
+            js = r.json()
+            items = js.get("items", [])
+            if not items: continue
+            
+            df = pd.DataFrame(items)
+            if "Tarih" not in df.columns: continue
+            
+            # Tarih düzeltme
+            df["Tarih_dt"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
+            if df["Tarih_dt"].isnull().all():
+                 df["Tarih_dt"] = pd.to_datetime(df["Tarih"], format="%Y-%m", errors="coerce")
+            
+            df = df.dropna(subset=["Tarih_dt"]).sort_values("Tarih_dt")
+            df["Donem"] = df["Tarih_dt"].dt.strftime("%Y-%m")
+            
+            val_cols = [c for c in df.columns if c not in ["Tarih", "UNIXTIME", "Tarih_dt", "Donem"]]
+            if not val_cols: continue
+            
+            part = pd.DataFrame({
+                "Tarih": df["Tarih_dt"].dt.strftime("%d-%m-%Y"),
+                "Donem": df["Donem"],
+                out_col: pd.to_numeric(df[val_cols[0]], errors="coerce"),
+            })
+            results[out_col] = part
 
+        df_m = results.get("TUFE_Aylik", pd.DataFrame())
+        df_y = results.get("TUFE_Yillik", pd.DataFrame())
+        
+        if df_m.empty and df_y.empty: return pd.DataFrame(), "Veri bulunamadı."
+        if df_m.empty: out = df_y
+        elif df_y.empty: out = df_m
+        else: out = pd.merge(df_m, df_y, on=["Tarih", "Donem"], how="outer")
+        
+        return out.sort_values(["Donem", "Tarih"]), None
     except Exception as e:
-        return pd.DataFrame(), f"EVDS Bağlantı Hatası: {str(e)}"
+        return pd.DataFrame(), str(e)
+
+@st.cache_data(ttl=600)
+def fetch_bis_cbpol_tr(start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
+    try:
+        s = start_date.strftime("%Y-%m-%d")
+        e = end_date.strftime("%Y-%m-%d")
+        url = f"https://stats.bis.org/api/v1/data/WS_CBPOL/D.TR?format=csv&startPeriod={s}&endPeriod={e}"
+        r = requests.get(url, timeout=25)
+        if r.status_code >= 400: return pd.DataFrame(), f"BIS HTTP {r.status_code}"
+        
+        content = r.content.decode("utf-8", errors="ignore")
+        if not content.strip(): return pd.DataFrame(), "Boş veri"
+        
+        df = pd.read_csv(io.StringIO(content))
+        df.columns = [c.strip().upper() for c in df.columns]
+        if "TIME_PERIOD" not in df.columns: return pd.DataFrame(), "Kolon hatası"
+        
+        out = df[["TIME_PERIOD", "OBS_VALUE"]].copy()
+        out["TIME_PERIOD"] = pd.to_datetime(out["TIME_PERIOD"], errors="coerce")
+        out = out.dropna(subset=["TIME_PERIOD"])
+        out["Donem"] = out["TIME_PERIOD"].dt.strftime("%Y-%m")
+        out["Tarih"] = out["TIME_PERIOD"].dt.strftime("%d-%m-%Y")
+        out["REPO_RATE"] = pd.to_numeric(out["OBS_VALUE"], errors="coerce")
+        return out[["Tarih", "Donem", "REPO_RATE"]].sort_values(["Donem", "Tarih"]), None
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+# --- VERİ ADAPTÖRÜ (Eski Kodun Yapısını Korumak İçin) ---
+def fetch_market_data_adapter(api_key, start_date, end_date):
+    """
+    Bu fonksiyon yeni veri çekme modüllerini (EVDS & BIS) kullanarak
+    eski kodun beklediği tekil DataFrame yapısını oluşturur.
+    """
+    # 1. Enflasyon (EVDS)
+    df_inf, err1 = fetch_evds_tufe_monthly_yearly(api_key, start_date, end_date)
+    # 2. Faiz (BIS)
+    df_pol, err2 = fetch_bis_cbpol_tr(start_date, end_date)
+
+    if df_inf.empty and df_pol.empty:
+        return pd.DataFrame(), f"Veri Yok: {err1} | {err2}"
+
+    # Birleştirme (Donem bazlı)
+    # BIS verisi günlük gelebilir, aylık ortalama veya son değeri alabiliriz ama 
+    # Dashboard uyumu için aylık bazda birleştirelim.
+    
+    combined = pd.DataFrame()
+    
+    if not df_inf.empty and not df_pol.empty:
+        # Enflasyon verisi zaten aylık. Faiz verisini de ona uyduralım.
+        df_pol_monthly = df_pol.groupby("Donem").last().reset_index()[['Donem', 'REPO_RATE']]
+        combined = pd.merge(df_inf, df_pol_monthly, on="Donem", how="outer")
+    elif not df_inf.empty:
+        combined = df_inf
+        combined['REPO_RATE'] = None
+    elif not df_pol.empty:
+        combined = df_pol.rename(columns={'REPO_RATE': 'REPO_RATE'}) # Sadece faiz var
+        combined['TUFE_Aylik'] = None
+        combined['TUFE_Yillik'] = None
+
+    # Eski Kolon İsimlerine Çevir
+    # Eski: 'Donem', 'PPK Faizi', 'Aylık TÜFE', 'Yıllık TÜFE'
+    mapper = {
+        'REPO_RATE': 'PPK Faizi',
+        'TUFE_Aylik': 'Aylık TÜFE',
+        'TUFE_Yillik': 'Yıllık TÜFE'
+    }
+    combined = combined.rename(columns=mapper)
+    
+    # Tarih kolonu yoksa oluştur (Sıralama için)
+    if 'Tarih' not in combined.columns and 'Donem' in combined.columns:
+        combined['Tarih'] = combined['Donem'] + "-01"
+    
+    return combined, None
 
 # --- EXCEL DASHBOARD & ISI HARİTASI MOTORU ---
 def create_excel_dashboard(df_source):
@@ -508,10 +594,12 @@ elif page == "Dashboard":
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # Dashboard için geniş aralık (API Varsa)
+        # Dashboard için geniş aralık (YENİ FETCHER KULLANIMI)
         dash_evds_start = datetime.date(2023, 1, 1)
         dash_evds_end = datetime.date(2025, 12, 31)
-        realized_df = fetch_evds_data(EVDS_API_KEY, dash_evds_start, dash_evds_end)
+        
+        # Eski yapıyı bozmamak için adaptör fonksiyonunu çağırıyoruz
+        realized_df, err = fetch_market_data_adapter(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         
         # Dict formatına çevir (Hızlı erişim için)
         realized_dict = {}
@@ -711,28 +799,39 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: PIYASA VERILERI (EVDS)
+# SAYFA: PIYASA VERILERI (EVDS & BIS - GÜNCELLENMİŞ)
 # ========================================================
 elif page == "📈 Piyasa Verileri (EVDS)":
-    st.header("📈 Gerçekleşen Piyasa Verileri (EVDS)")
-    st.info("Bu ekran sadece TCMB EVDS üzerinden canlı veri çeker. Manuel veri yoktur.")
+    st.header("📈 Gerçekleşen Piyasa Verileri (EVDS & BIS)")
+    st.info("Bu ekran TCMB EVDS (Enflasyon) ve BIS (Politika Faizi) kaynaklarından veri çeker.")
     
     with st.sidebar:
         st.markdown("### 📅 Tarih Aralığı")
-        # Varsayılan: 2024 başından 2025 sonuna kadar
         sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
         ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
     
     if EVDS_API_KEY:
-        with st.spinner("EVDS'den veri çekiliyor..."):
-            df_evds = fetch_evds_data(EVDS_API_KEY, sd, ed)
+        with st.spinner("Veriler çekiliyor (EVDS & BIS)..."):
+            # Yeni çekme fonksiyonlarını kullanan Adaptörü çağırıyoruz
+            df_evds, err = fetch_market_data_adapter(EVDS_API_KEY, sd, ed)
         
-        if df_evds.empty:
-            st.warning("Bu tarih aralığı için veri bulunamadı veya API hatası oluştu.")
-        else:
+        if not df_evds.empty:
             c1, c2 = st.columns([3, 1])
             with c1: st.dataframe(df_evds, use_container_width=True, height=500)
-            with c2: st.download_button("📥 Excel İndir", to_excel(df_evds), "EVDS_Verileri.xlsx", type="primary")
+            with c2: st.download_button("📥 Excel İndir", to_excel(df_evds), "Piyasa_Verileri.xlsx", type="primary")
+            
+            # Grafikler
+            st.markdown("---")
+            c_g1, c_g2 = st.columns(2)
+            if 'PPK Faizi' in df_evds.columns:
+                c_g1.plotly_chart(px.line(df_evds, x='Donem', y='PPK Faizi', title="Politika Faizi (BIS Kaynaklı)", markers=True), use_container_width=True)
+            if 'Aylık TÜFE' in df_evds.columns:
+                c_g2.plotly_chart(px.line(df_evds, x='Donem', y='Aylık TÜFE', title="Aylık Enflasyon (EVDS)", markers=True), use_container_width=True)
+
+        elif err:
+            st.warning(f"Hata oluştu: {err}")
+        else:
+            st.warning("Bu tarih aralığı için veri bulunamadı.")
     else:
         st.error("Lütfen .streamlit/secrets.toml dosyasına EVDS_KEY ekleyiniz.")
 
