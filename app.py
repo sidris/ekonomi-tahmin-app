@@ -7,16 +7,8 @@ import io
 import datetime
 import requests
 
-# --- KÜTÜPHANE KONTROLÜ ---
-try:
-    from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-except ImportError:
-    pass # Zorunlu değil, hata vermesin
-
 # =========================================================
-# 1) AYARLAR
+# 0) KURULUM / UI
 # =========================================================
 st.set_page_config(
     page_title="Finansal Tahmin Terminali",
@@ -39,14 +31,15 @@ div[data-testid="stDataFrame"] { width: 100%; }
 )
 
 # =========================================================
-# 2) SECRETS + SUPABASE
+# 1) SECRETS + SUPABASE
 # =========================================================
 try:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
-    supabase: Client = create_client(url, key)
+
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
     st.error(f"secrets.toml kontrol: {e}")
     st.stop()
@@ -54,11 +47,14 @@ except Exception as e:
 TABLE_TAHMIN = "tahminler4"
 TABLE_KATILIMCI = "katilimcilar"
 
+# EVDS
 EVDS_BASE = "https://evds2.tcmb.gov.tr/service/evds"
-EVDS_TUFE_SERIES = "TP.FG.J0"  # TÜFE Genel (2003=100)
+EVDS_TUFE_SERIES = "TP.FG.J0"   # senin çalışan seri
+# Repo faizi: sadece BIS
+BIS_TR_POLICY = "https://stats.bis.org/api/v1/data/WS_CBPOL/D.TR"
 
 # =========================================================
-# 3) YARDIMCI FONKSİYONLAR
+# 2) GENEL YARDIMCILAR
 # =========================================================
 def get_period_list():
     years = range(2024, 2033)
@@ -155,7 +151,8 @@ def to_excel(df):
     return output.getvalue()
 
 # =========================================================
-# 4) EVDS (TÜFE AYLIK+YILLIK) - GÜNCELLENMİŞ VERSİYON
+# 3) EVDS TÜFE: formulas=1 (aylık), formulas=3 (yıllık)
+#    Not: EVDS bu çağrılarda kolonları TP_FG_J0-1 / TP_FG_J0-3 döndürüyor
 # =========================================================
 def _evds_headers(api_key: str) -> dict:
     return {
@@ -164,11 +161,7 @@ def _evds_headers(api_key: str) -> dict:
         "Accept": "application/json,text/plain,*/*",
     }
 
-def _normalize_evds_col(code: str) -> str:
-    return code.replace(".", "_").replace("-", "_")
-
-def _evds_url_single(series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int | None) -> str:
-    # EVDS dd-mm-yyyy formatı ister
+def _evds_url(series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int | None) -> str:
     s = start_date.strftime("%d-%m-%Y")
     e = end_date.strftime("%d-%m-%Y")
     url = f"{EVDS_BASE}/series={series_code}&startDate={s}&endDate={e}&type=json"
@@ -176,127 +169,158 @@ def _evds_url_single(series_code: str, start_date: datetime.date, end_date: date
         url += f"&formulas={int(formulas)}"
     return url
 
-def _evds_get_json(url: str, api_key: str, timeout: int = 25) -> dict:
-    r = requests.get(url, headers=_evds_headers(api_key), timeout=timeout)
+def _parse_evds_tarih_to_period(tarih_str: str) -> tuple[str | None, pd.Timestamp | None]:
+    """
+    EVDS burada Tarih'i '2025-1' gibi döndürüyor.
+    Bunu '2025-01' (Donem) ve Timestamp (2025-01-01) yapıyoruz.
+    """
+    if not isinstance(tarih_str, str) or "-" not in tarih_str:
+        return None, None
+    try:
+        y, m = tarih_str.split("-", 1)
+        y = int(y.strip())
+        m = int(m.strip())
+        period = f"{y:04d}-{m:02d}"
+        dt = pd.Timestamp(year=y, month=m, day=1)
+        return period, dt
+    except Exception:
+        return None, None
+
+def _pick_value_column(df: pd.DataFrame, formulas: int) -> str | None:
+    """
+    Öncelik: TP_FG_J0-1 / TP_FG_J0-3
+    Eğer EVDS farklı isim döndürürse fallback ile 'TP_FG_J0' dışındaki numeric kolonlara bakar.
+    """
+    preferred = f"TP_FG_J0-{formulas}"
+    if preferred in df.columns:
+        return preferred
+
+    # Bazen '.' '_' farklı olabilir ama senin curl net: TP_FG_J0-1 / -3
+    # Yine de fallback:
+    candidates = [c for c in df.columns if c.upper().startswith("TP_FG_J0") and c != "TP_FG_J0"]
+    if candidates:
+        # -1 veya -3 içereni seç
+        for c in candidates:
+            if str(formulas) in c:
+                return c
+        return candidates[0]
+
+    # son çare: Tarih/UNIXTIME dışındaki ilk kolon
+    nondata = {"Tarih", "UNIXTIME", "TP_FG_J0"}
+    rest = [c for c in df.columns if c not in nondata]
+    return rest[0] if rest else None
+
+def _evds_get_df(api_key: str, series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int) -> tuple[pd.DataFrame, str | None]:
+    url = _evds_url(series_code, start_date, end_date, formulas=formulas)
+    try:
+        r = requests.get(url, headers=_evds_headers(api_key), timeout=25)
+    except Exception as e:
+        return pd.DataFrame(), f"EVDS bağlantı hatası: {e}"
+
+    ct = (r.headers.get("Content-Type") or "").lower()
+    if "text/html" in ct:
+        prev = (r.text or "")[:500]
+        return pd.DataFrame(), f"EVDS HTML döndürdü (HTTP {r.status_code}). Url: {url}. Cevap(ilk500): {prev}"
+
     if r.status_code >= 400:
-        raise requests.HTTPError(f"EVDS Hatası: {r.status_code}")
-    return r.json()
+        prev = (r.text or "")[:500]
+        return pd.DataFrame(), f"EVDS HTTP {r.status_code}. Url: {url}. Cevap(ilk500): {prev}"
+
+    try:
+        js = r.json()
+    except Exception:
+        prev = (r.text or "")[:500]
+        return pd.DataFrame(), f"EVDS JSON parse edilemedi. Url: {url}. Cevap(ilk500): {prev}"
+
+    items = js.get("items", [])
+    if not items:
+        return pd.DataFrame(), f"EVDS boş döndü. Url: {url}"
+
+    df = pd.DataFrame(items)
+    if "Tarih" not in df.columns:
+        return pd.DataFrame(), f"EVDS 'Tarih' yok. Kolonlar: {list(df.columns)[:30]}"
+
+    val_col = _pick_value_column(df, formulas=formulas)
+    if not val_col:
+        return pd.DataFrame(), f"EVDS değer kolonu bulunamadı. Kolonlar: {list(df.columns)[:30]}"
+
+    # Tarih (2025-1) -> Donem (2025-01) + Tarih_dt (2025-01-01)
+    periods = []
+    dts = []
+    for t in df["Tarih"].astype(str).tolist():
+        p, dt = _parse_evds_tarih_to_period(t)
+        periods.append(p)
+        dts.append(dt)
+
+    out = pd.DataFrame({
+        "Tarih_raw": df["Tarih"].astype(str),
+        "Donem": periods,
+        "Tarih_dt": dts,
+        "Deger": pd.to_numeric(df[val_col], errors="coerce"),
+    }).dropna(subset=["Donem", "Tarih_dt"])
+
+    out["Tarih"] = out["Tarih_dt"].dt.strftime("%Y-%m")  # tablo için sade
+    out = out[["Tarih", "Donem", "Tarih_dt", "Deger"]].sort_values("Tarih_dt").reset_index(drop=True)
+
+    return out, None
 
 @st.cache_data(ttl=300)
 def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
-    """
-    TP.FG.J0:
-      formulas=1 -> TÜFE Aylık Değişim (%)
-      formulas=2 -> TÜFE Yıllık Değişim (%)  <-- DÜZELTİLDİ (Eskisi 3 idi)
-    """
     if not api_key:
         return pd.DataFrame(), "EVDS_KEY eksik (secrets.toml)"
 
-    try:
-        results = {}
-        # formulas=1: Aylık, formulas=2: Yıllık
-        for formulas, out_col in [(1, "TUFE_Aylik"), (2, "TUFE_Yillik")]:
-            url = _evds_url_single(EVDS_TUFE_SERIES, start_date, end_date, formulas=formulas)
-            js = _evds_get_json(url, api_key)
-            items = js.get("items", [])
-            
-            if not items:
-                # Veri yoksa boş dön ama hata fırlatma, belki diğer formülde vardır
-                results[out_col] = pd.DataFrame()
-                continue
+    df_m, err_m = _evds_get_df(api_key, EVDS_TUFE_SERIES, start_date, end_date, formulas=1)
+    if err_m:
+        return pd.DataFrame(), err_m
+    df_y, err_y = _evds_get_df(api_key, EVDS_TUFE_SERIES, start_date, end_date, formulas=3)
+    if err_y:
+        return pd.DataFrame(), err_y
 
-            df = pd.DataFrame(items)
-            
-            # Kolon kontrolü
-            if "Tarih" not in df.columns:
-                continue
+    df_m = df_m.rename(columns={"Deger": "TUFE_Aylik"})
+    df_y = df_y.rename(columns={"Deger": "TUFE_Yillik"})
 
-            # Tarihleri işle
-            df["Tarih_dt"] = pd.to_datetime(df["Tarih"], dayfirst=False, errors="coerce") 
-            # Not: EVDS JSON çıktısı bazen YYYY-MM, bazen DD-MM-YYYY dönebilir. 
-            # API'den formulas parametresi ile genelde YYYY-MM gelir.
-            
-            # Eğer yukarıdaki parse çalışmazsa alternatif formatı dene
-            if df["Tarih_dt"].isnull().all():
-                 df["Tarih_dt"] = pd.to_datetime(df["Tarih"], format="%Y-%m", errors="coerce")
+    out = pd.merge(
+        df_m[["Donem", "Tarih_dt", "TUFE_Aylik"]],
+        df_y[["Donem", "Tarih_dt", "TUFE_Yillik"]],
+        on=["Donem", "Tarih_dt"],
+        how="outer",
+    ).sort_values("Tarih_dt").reset_index(drop=True)
 
-            df = df.dropna(subset=["Tarih_dt"]).sort_values("Tarih_dt")
-            df["Donem"] = df["Tarih_dt"].dt.strftime("%Y-%m")
-            
-            # Formüllü veri çektiğimizde kolon adı sonuna ek alabilir (örn: TP_FG_J0_1)
-            # Bu yüzden kolon ismini dinamik bulalım (Tarih ve UNIXTIME haricindeki ilk kolon)
-            val_cols = [c for c in df.columns if c not in ["Tarih", "UNIXTIME", "Tarih_dt", "Donem"]]
-            if not val_cols:
-                continue
-            
-            val_col = val_cols[0] # İlk veri kolonunu al
-
-            part = pd.DataFrame({
-                "Tarih": df["Tarih_dt"].dt.strftime("%d-%m-%Y"),
-                "Donem": df["Donem"],
-                out_col: pd.to_numeric(df[val_col], errors="coerce"),
-            })
-
-            results[out_col] = part
-
-        if not results.get("TUFE_Aylik", pd.DataFrame()).empty and not results.get("TUFE_Yillik", pd.DataFrame()).empty:
-             out = pd.merge(results["TUFE_Aylik"], results["TUFE_Yillik"], on=["Tarih", "Donem"], how="outer")
-        elif not results.get("TUFE_Aylik", pd.DataFrame()).empty:
-             out = results["TUFE_Aylik"]
-        elif not results.get("TUFE_Yillik", pd.DataFrame()).empty:
-             out = results["TUFE_Yillik"]
-        else:
-             return pd.DataFrame(), "EVDS'den veri dönmedi."
-
-        out = out.sort_values(["Donem", "Tarih"]).reset_index(drop=True)
-        return out, None
-
-    except Exception as e:
-        return pd.DataFrame(), f"EVDS Hatası: {e}"
+    out["Tarih"] = out["Tarih_dt"].dt.strftime("%Y-%m")
+    out = out[["Tarih", "Donem", "TUFE_Aylik", "TUFE_Yillik", "Tarih_dt"]]
+    return out, None
 
 
 # =========================================================
-# 5) BIS (REPO/POLICY RATE) - GÜNCELLENMİŞ VERSİYON
+# 4) BIS Repo/Policy Rate (TR)
 # =========================================================
 @st.cache_data(ttl=300)
-def fetch_bis_cbpol_tr(start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
-    """
-    BIS: WS_CBPOL / D.TR (policy rate)
-    """
+def fetch_bis_repo_tr(start_date: datetime.date, end_date: datetime.date) -> tuple[pd.DataFrame, str | None]:
     try:
-        # BIS yyyy-mm-dd formatı ister
         s = start_date.strftime("%Y-%m-%d")
         e = end_date.strftime("%Y-%m-%d")
-        url = f"https://stats.bis.org/api/v1/data/WS_CBPOL/D.TR?format=csv&startPeriod={s}&endPeriod={e}"
+        url = f"{BIS_TR_POLICY}?format=csv&startPeriod={s}&endPeriod={e}"
 
         r = requests.get(url, timeout=25)
         if r.status_code >= 400:
-            return pd.DataFrame(), f"BIS HTTP {r.status_code}"
+            prev = (r.text or "")[:500]
+            return pd.DataFrame(), f"BIS HTTP {r.status_code}. Cevap(ilk500): {prev}"
 
-        # CSV Okuma (Daha güvenli yöntem)
         content = r.content.decode("utf-8", errors="ignore")
-        
-        # BIS bazen boş dönebilir
-        if not content.strip():
-             return pd.DataFrame(), "BIS boş veri döndü."
-
         df = pd.read_csv(io.StringIO(content))
-        
-        # Sütun adlarını temizle
-        df.columns = [c.strip().upper() for c in df.columns]
+        df.columns = [c.upper() for c in df.columns]
 
         if "TIME_PERIOD" not in df.columns or "OBS_VALUE" not in df.columns:
-            return pd.DataFrame(), f"BIS beklenen sütunları (TIME_PERIOD, OBS_VALUE) bulamadı. Gelen: {list(df.columns)}"
+            return pd.DataFrame(), f"BIS kolonları farklı: {list(df.columns)[:30]}"
 
         out = df[["TIME_PERIOD", "OBS_VALUE"]].copy()
         out["TIME_PERIOD"] = pd.to_datetime(out["TIME_PERIOD"], errors="coerce")
         out = out.dropna(subset=["TIME_PERIOD"])
-        
+
         out["Donem"] = out["TIME_PERIOD"].dt.strftime("%Y-%m")
-        out["Tarih"] = out["TIME_PERIOD"].dt.strftime("%d-%m-%Y")
+        out["Tarih"] = out["TIME_PERIOD"].dt.strftime("%Y-%m-%d")
         out["REPO_RATE"] = pd.to_numeric(out["OBS_VALUE"], errors="coerce")
-        
-        out = out[["Tarih", "Donem", "REPO_RATE"]].sort_values(["Donem", "Tarih"]).reset_index(drop=True)
+        out = out[["Tarih", "Donem", "REPO_RATE"]].sort_values("Tarih").reset_index(drop=True)
 
         return out, None
 
@@ -305,7 +329,7 @@ def fetch_bis_cbpol_tr(start_date: datetime.date, end_date: datetime.date) -> tu
 
 
 # =========================================================
-# 6) AUTH
+# 5) AUTH
 # =========================================================
 if "giris_yapildi" not in st.session_state:
     st.session_state["giris_yapildi"] = False
@@ -323,8 +347,9 @@ if not st.session_state["giris_yapildi"]:
                 st.error("Şifre hatalı.")
         st.stop()
 
+
 # =========================================================
-# 7) SIDEBAR
+# 6) SIDEBAR
 # =========================================================
 with st.sidebar:
     st.title("📊 Menü")
@@ -386,12 +411,6 @@ if page == "Dashboard":
             else x["kullanici_adi"],
             axis=1,
         )
-        d["hover_text"] = d.apply(
-            lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}"
-            if pd.notnull(x.get("katilimci_sayisi")) and pd.notnull(x.get("tahmin_tarihi"))
-            else "",
-            axis=1,
-        )
         d["kategori"] = d["kategori"].fillna("Bireysel")
         d["anket_kaynagi"] = d["anket_kaynagi"].fillna("-")
         d["yil"] = d["donem"].apply(lambda x: str(x).split("-")[0] if isinstance(x, str) else "")
@@ -405,7 +424,6 @@ if page == "Dashboard":
 
     with st.sidebar:
         st.markdown("### 🔍 Filtreler")
-        x_axis_mode = st.radio("X Ekseni", ["📅 Hedef Dönem", "⏳ Tahmin Tarihi"])
         cat_filter = st.multiselect("Kategori", sorted(df_latest["kategori"].unique()), default=sorted(df_latest["kategori"].unique()))
         avail_src = sorted(df_latest[df_latest["kategori"].isin(cat_filter)]["anket_kaynagi"].astype(str).unique())
         src_filter = st.multiselect("Kaynak", avail_src, default=avail_src)
@@ -413,49 +431,24 @@ if page == "Dashboard":
         usr_filter = st.multiselect("Katılımcı", avail_usr, default=avail_usr)
         yr_filter = st.multiselect("Yıl", sorted(df_latest["yil"].unique()), default=sorted(df_latest["yil"].unique()))
 
-    is_single_user = len(usr_filter) == 1
-
-    if is_single_user:
-        target_df = df_history[df_history["gorunen_isim"].isin(usr_filter) & df_history["yil"].isin(yr_filter)].copy()
-        x_axis_col = "tahmin_tarihi"
-        sort_col = "tahmin_tarihi"
-        tick_format = "%d-%m-%Y"
-    else:
-        target_df = df_latest[
-            df_latest["kategori"].isin(cat_filter)
-            & df_latest["anket_kaynagi"].isin(src_filter)
-            & df_latest["gorunen_isim"].isin(usr_filter)
-            & df_latest["yil"].isin(yr_filter)
-        ].copy()
-        x_axis_col = "donem"
-        sort_col = "donem_date"
-        tick_format = None
+    target_df = df_latest[
+        df_latest["kategori"].isin(cat_filter)
+        & df_latest["anket_kaynagi"].isin(src_filter)
+        & df_latest["gorunen_isim"].isin(usr_filter)
+        & df_latest["yil"].isin(yr_filter)
+    ].copy()
 
     if target_df.empty:
         st.warning("Veri bulunamadı.")
         st.stop()
 
-    def plot(y, min_c, max_c, tit):
-        chart_data = target_df.sort_values(sort_col)
-        fig = px.line(
-            chart_data,
-            x=x_axis_col,
-            y=y,
-            color="gorunen_isim" if not is_single_user else "donem",
-            markers=True,
-            title=tit,
-            hover_data=["hover_text"],
-        )
-        if tick_format:
-            fig.update_xaxes(tickformat=tick_format)
-
-        st.plotly_chart(fig, use_container_width=True)
-
     c1, c2 = st.columns(2)
     with c1:
-        plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar")
+        fig = px.line(target_df.sort_values("donem_date"), x="donem", y="tahmin_ppk_faiz", color="gorunen_isim", markers=True, title="PPK Beklentileri")
+        st.plotly_chart(fig, use_container_width=True)
     with c2:
-        plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "Yıl Sonu Enflasyon")
+        fig = px.line(target_df.sort_values("donem_date"), x="donem", y="tahmin_yilsonu_enf", color="gorunen_isim", markers=True, title="Yıl Sonu Enflasyon Beklentileri")
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
@@ -463,58 +456,55 @@ if page == "Dashboard":
 # =========================================================
 elif page == "📈 Piyasa Verileri (EVDS TÜFE + BIS Repo)":
     st.header("📈 Gerçekleşen Piyasa Verileri")
-    st.info("EVDS: TÜFE (TP.FG.J0) | BIS: Policy Rate (TR)")
+    st.info("EVDS: TÜFE Aylık/Yıllık (TP.FG.J0 formulas=1/3). Repo: sadece BIS (WS_CBPOL / D.TR).")
 
     with st.sidebar:
         st.markdown("### 📅 Tarih Aralığı")
         sd = st.date_input("Başlangıç", datetime.date(2025, 1, 1))
         ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
-
         st.markdown("---")
         if EVDS_API_KEY:
-            st.caption("EVDS Sorgu Linkleri:")
-            st.code(_evds_url_single(EVDS_TUFE_SERIES, sd, ed, formulas=1))
+            st.caption("EVDS URL örnekleri:")
+            st.code(_evds_url(EVDS_TUFE_SERIES, sd, ed, formulas=1))
+            st.code(_evds_url(EVDS_TUFE_SERIES, sd, ed, formulas=3))
+        st.caption("BIS URL örneği:")
+        st.code(f"{BIS_TR_POLICY}?format=csv&startPeriod={sd:%Y-%m-%d}&endPeriod={ed:%Y-%m-%d}")
 
-    # EVDS TÜFE
-    st.subheader("EVDS: TÜFE Enflasyonu")
+    # EVDS
+    st.subheader("EVDS: TÜFE (Aylık & Yıllık)")
     if not EVDS_API_KEY:
         st.error("EVDS_KEY secrets.toml içinde yok.")
-        df_evds = pd.DataFrame()
     else:
         with st.spinner("EVDS çekiliyor..."):
-            df_evds, err_evds = fetch_evds_tufe_monthly_yearly(EVDS_API_KEY, sd, ed)
-        if err_evds:
-            st.error(err_evds)
+            df_tufe, err = fetch_evds_tufe_monthly_yearly(EVDS_API_KEY, sd, ed)
+        if err:
+            st.error(err)
+        elif df_tufe.empty:
+            st.warning("EVDS veri boş döndü.")
+        else:
+            st.dataframe(df_tufe.drop(columns=["Tarih_dt"]), use_container_width=True, height=420)
+            st.download_button("📥 EVDS TÜFE Excel", to_excel(df_tufe.drop(columns=["Tarih_dt"])), "EVDS_TUFE.xlsx", type="primary")
 
-    if df_evds is not None and not df_evds.empty:
-        st.dataframe(df_evds, use_container_width=True, height=400)
-        st.download_button("📥 EVDS TÜFE Excel", to_excel(df_evds), "EVDS_TUFE.xlsx", type="primary")
-
-        fig = go.Figure()
-        if "TUFE_Aylik" in df_evds.columns:
-            fig.add_trace(go.Scatter(x=df_evds["Tarih"], y=df_evds["TUFE_Aylik"], mode="lines+markers", name="TÜFE Aylık (%)"))
-        if "TUFE_Yillik" in df_evds.columns:
-            fig.add_trace(go.Scatter(x=df_evds["Tarih"], y=df_evds["TUFE_Yillik"], mode="lines+markers", name="TÜFE Yıllık (%)", line=dict(dash='dot')))
-        
-        fig.update_layout(title="TÜFE Enflasyon Oranları (Kaynak: TCMB/EVDS)", xaxis_title="Tarih", yaxis_title="Yüzde (%)", hovermode="x unified")
-        st.plotly_chart(fig, use_container_width=True)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df_tufe["Tarih_dt"], y=df_tufe["TUFE_Aylik"], mode="lines+markers", name="TÜFE Aylık"))
+            fig.add_trace(go.Scatter(x=df_tufe["Tarih_dt"], y=df_tufe["TUFE_Yillik"], mode="lines+markers", name="TÜFE Yıllık"))
+            fig.update_layout(title="EVDS TÜFE (TP.FG.J0) - formulas 1/3", xaxis_title="Tarih", yaxis_title="Değer")
+            st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
-    # BIS Repo/Policy rate
-    st.subheader("BIS: Politika Faizi (TR)")
-    with st.spinner("BIS verisi çekiliyor..."):
-        df_bis, err_bis = fetch_bis_cbpol_tr(sd, ed)
-    
-    if err_bis:
-        st.error(err_bis)
-
-    if not df_bis.empty:
-        st.dataframe(df_bis, use_container_width=True, height=400)
-        st.download_button("📥 BIS Faiz Excel", to_excel(df_bis), "BIS_FAIZ_TR.xlsx", type="primary")
-        
-        fig2 = px.line(df_bis, x="Tarih", y="REPO_RATE", markers=True, title="TCMB Politika Faizi (Kaynak: BIS)")
-        fig2.update_traces(line_color='#B71C1C')
+    # BIS
+    st.subheader("BIS: Repo/Policy Rate (TR)")
+    with st.spinner("BIS çekiliyor..."):
+        df_repo, err2 = fetch_bis_repo_tr(sd, ed)
+    if err2:
+        st.error(err2)
+    elif df_repo.empty:
+        st.warning("BIS veri boş döndü.")
+    else:
+        st.dataframe(df_repo, use_container_width=True, height=420)
+        st.download_button("📥 BIS Repo Excel", to_excel(df_repo), "BIS_REPO_TR.xlsx", type="primary")
+        fig2 = px.line(df_repo, x="Tarih", y="REPO_RATE", markers=True, title="TR Repo/Policy Rate (BIS WS_CBPOL)")
         st.plotly_chart(fig2, use_container_width=True)
 
 
@@ -551,7 +541,7 @@ elif page == "Katılımcı Yönetimi":
 
 
 # =========================================================
-# SAYFA: VERİ GİRİŞİ
+# SAYFA: VERİ GİRİŞİ (PPK / Enflasyon)
 # =========================================================
 elif page in ["PPK Girişi", "Enflasyon Girişi"]:
     st.header(f"➕ {page}")
