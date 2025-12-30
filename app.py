@@ -169,7 +169,7 @@ def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_
         return pd.DataFrame(), "EVDS_KEY eksik."
     try:
         results = {}
-        # formulas=1 (Aylık), formulas=3 (Yıllık Değişim - DÜZELTİLDİ)
+        # formulas=1 (Aylık), formulas=3 (Yıllık Değişim)
         for formulas, out_col in [(1, "TUFE_Aylik"), (3, "TUFE_Yillik")]:
             url = _evds_url_single(EVDS_TUFE_SERIES, start_date, end_date, formulas=formulas)
             r = requests.get(url, headers=_evds_headers(api_key), timeout=25)
@@ -601,8 +601,24 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 nye = c3.number_input("YS Enf", value=g('tahmin_yilsonu_enf'), step=0.1)
                             
                             if st.form_submit_button("Kaydet"):
-                                def cv(v): return v if v!=0 else None
-                                upd = {"tahmin_tarihi": nd.strftime('%Y-%m-%d'), "donem": ndo, "kaynak_link": nl if nl else None, "katilimci_sayisi": int(nk), "tahmin_ppk_faiz": cv(npk), "tahmin_yilsonu_faiz": cv(nyf), "tahmin_aylik_enf": cv(na), "tahmin_yillik_enf": cv(nyillik), "tahmin_yilsonu_enf": cv(nye)}
+                                def cv(v): 
+                                    try:
+                                        val = float(v)
+                                        if pd.isna(val) or val == 0: return None
+                                        return val
+                                    except: return None
+                                    
+                                upd = {
+                                    "tahmin_tarihi": nd.strftime('%Y-%m-%d'), 
+                                    "donem": ndo, 
+                                    "kaynak_link": nl if nl else None, 
+                                    "katilimci_sayisi": int(nk),
+                                    "tahmin_ppk_faiz": cv(npk), 
+                                    "tahmin_yilsonu_faiz": cv(nyf), 
+                                    "tahmin_aylik_enf": cv(na), 
+                                    "tahmin_yillik_enf": cv(nyillik), 
+                                    "tahmin_yilsonu_enf": cv(nye)
+                                }
                                 supabase.table(TABLE_TAHMIN).update(upd).eq("id", int(t['id'])).execute()
                                 del st.session_state['edit_target']; st.rerun()
                         if st.button("İptal"): del st.session_state['edit_target']; st.rerun()
@@ -621,22 +637,26 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
 # ========================================================
 elif page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
+    
+    # Verileri Çek
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
     df_k = pd.DataFrame(res_k.data)
 
     if not df_t.empty and not df_k.empty:
+        # Temizlik
         df_t = clean_and_sort_data(df_t)
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # Dashboard için veri çekme
+        # Gerçekleşen Verileri Çek (Geniş Aralık)
         dash_evds_start = datetime.date(2023, 1, 1)
         dash_evds_end = datetime.date(2025, 12, 31)
         
         realized_df, err = fetch_market_data_adapter(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         
+        # Gerçekleşen veriyi sözlüğe çevir (Hızlı erişim için)
         realized_dict = {}
         if not realized_df.empty:
             for _, row in realized_df.iterrows():
@@ -646,7 +666,9 @@ elif page == "Dashboard":
                     'enf_yil': row.get('Yıllık TÜFE')
                 }
 
+        # Dataframe Birleştirme
         df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+        # Her katılımcının ilgili dönem için verdiği SON tahmin (Revizyonlar elendi)
         df_latest_raw = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df_latest = pd.merge(df_latest_raw, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         
@@ -657,66 +679,85 @@ elif page == "Dashboard":
             d['anket_kaynagi'] = d['anket_kaynagi'].fillna('-')
             d['yil'] = d['donem'].apply(lambda x: x.split('-')[0])
 
+        # Üst Metrikler
         c1, c2, c3 = st.columns(3)
         c1.metric("Toplam Katılımcı", df_latest['kullanici_adi'].nunique())
-        c2.metric("Güncel Tahmin Sayısı", len(df_latest))
+        c2.metric("Toplam Tahmin Verisi", len(df_latest))
         c3.metric("Son Güncelleme", df_latest['tahmin_tarihi'].max().strftime('%d.%m.%Y'))
         st.markdown("---")
 
-        # --- EN İSABETLİ TAHMİNCİLER (MVP) KARTLARI ---
-        st.markdown("### 🏆 Dönemin En İsabetli Tahmincileri")
-        if realized_dict:
-            sorted_realized_periods = sorted(realized_dict.keys(), reverse=True)
-            latest_realized_period = None
-            latest_metrics = {}
-            for p in sorted_realized_periods:
-                vals = realized_dict[p]
-                if vals.get('ppk') is not None or vals.get('enf_yil') is not None:
-                    latest_realized_period = p
-                    latest_metrics = vals
-                    break
+        # --- GELİŞMİŞ PERFORMANS ANALİZİ (EN İYİ TAHMİNCİLER) ---
+        st.subheader("🏆 Dönemin En İsabetli Tahmincileri")
+        
+        if not realized_df.empty:
+            available_realized_periods = sorted(realized_df['Donem'].unique().tolist(), reverse=True)
             
-            if latest_realized_period:
-                df_mvp = df_latest[df_latest['donem'] == latest_realized_period].copy()
-                if not df_mvp.empty:
-                    c_mvp1, c_mvp2 = st.columns(2)
-                    # 1. PPK
-                    if latest_metrics.get('ppk') is not None:
-                        actual_ppk = latest_metrics['ppk']
-                        df_mvp['err_ppk'] = (df_mvp['tahmin_ppk_faiz'] - actual_ppk).abs()
-                        best_ppk = df_mvp.sort_values('err_ppk').head(1)
-                        if not best_ppk.empty:
-                            winner = best_ppk.iloc[0]
-                            c_mvp1.info(f"🎯 **PPK ({latest_realized_period})**\n\n"
-                                        f"**Gerçekleşen:** %{actual_ppk}\n\n"
-                                        f"**En Yakın:** {winner['gorunen_isim']}\n\n"
-                                        f"**Tahmin:** %{winner['tahmin_ppk_faiz']} (Sapma: {winner['err_ppk']:.2f})")
-                    else: c_mvp1.warning(f"{latest_realized_period} için PPK yok.")
-                    # 2. ENFLASYON (YILLIK)
-                    if latest_metrics.get('enf_yil') is not None:
-                        actual_enf = latest_metrics['enf_yil']
-                        # Öncelikle Yıllık Enflasyon kolonuna bak, yoksa Yıl Sonu kolonuna bak
-                        if 'tahmin_yillik_enf' in df_mvp.columns:
-                            col_to_use = 'tahmin_yillik_enf'
-                        else:
-                            col_to_use = 'tahmin_yilsonu_enf'
-                        
-                        # Boş olmayanları al
-                        df_mvp_e = df_mvp.dropna(subset=[col_to_use]).copy()
-                        df_mvp_e['err_enf'] = (df_mvp_e[col_to_use] - actual_enf).abs()
-                        best_enf = df_mvp_e.sort_values('err_enf').head(1)
-                        
-                        if not best_enf.empty:
-                            winner = best_enf.iloc[0]
-                            c_mvp2.success(f"🏷️ **Yıllık Enflasyon ({latest_realized_period})**\n\n"
-                                           f"**Gerçekleşen:** %{actual_enf}\n\n"
-                                           f"**En Yakın:** {winner['gorunen_isim']}\n\n"
-                                           f"**Tahmin:** %{winner[col_to_use]:.2f} (Sapma: {winner['err_enf']:.2f})")
-                    else: c_mvp2.warning(f"{latest_realized_period} için Enf yok.")
-                else: st.info("Bu dönem için tahmin bulunamadı.")
-            else: st.info("Karşılaştırılacak veri bulunamadı.")
+            with st.expander("⚙️ Performans Analizi Ayarları (Tarih Aralığı)", expanded=True):
+                col_p1, col_p2 = st.columns(2)
+                # Varsayılan olarak son 3 dönemi seçelim (veya mevcutsa)
+                def_idx_end = 0
+                def_idx_start = min(2, len(available_realized_periods)-1)
+                
+                p_end = col_p1.selectbox("Bitiş Dönemi", available_realized_periods, index=def_idx_end)
+                # Başlangıç, bitişten küçük veya eşit olmalı mantığı
+                remain_periods = [p for p in available_realized_periods if p <= p_end]
+                p_start = col_p2.selectbox("Başlangıç Dönemi", remain_periods, index=min(2, len(remain_periods)-1))
+            
+            # Seçilen aralıktaki gerçekleşen verileri filtrele
+            mask_real = (realized_df['Donem'] >= p_start) & (realized_df['Donem'] <= p_end)
+            target_real_df = realized_df[mask_real].copy()
+            
+            if not target_real_df.empty:
+                # Tahminleri Gerçekleşenlerle Birleştir
+                # df_latest: Her katılımcının o dönem için verdiği son karar.
+                perf_df = pd.merge(df_latest, target_real_df, left_on="donem", right_on="Donem", how="inner")
+                
+                # Hata Hesaplamaları (Mutlak Sapma)
+                perf_df['err_ppk'] = (perf_df['tahmin_ppk_faiz'] - perf_df['PPK Faizi']).abs()
+                perf_df['err_enf_ay'] = (perf_df['tahmin_aylik_enf'] - perf_df['Aylık TÜFE']).abs()
+                
+                # Yıllık Enflasyon için: Eğer 'tahmin_yillik_enf' kolonu doluysa onu kullan, yoksa yıl sonunu dene
+                if 'tahmin_yillik_enf' in perf_df.columns:
+                     perf_df['val_enf_yil'] = perf_df['tahmin_yillik_enf'].fillna(perf_df['tahmin_yilsonu_enf'])
+                else:
+                     perf_df['val_enf_yil'] = perf_df['tahmin_yilsonu_enf']
+                     
+                perf_df['err_enf_yil'] = (perf_df['val_enf_yil'] - perf_df['Yıllık TÜFE']).abs()
+
+                # --- KARTLARI OLUŞTUR ---
+                c_best1, c_best2, c_best3 = st.columns(3)
+
+                def show_champion_card(col_obj, title, err_col, unit, icon):
+                    # İlgili hatası boş olmayanları al
+                    valid_df = perf_df.dropna(subset=[err_col])
+                    if valid_df.empty:
+                        col_obj.warning(f"{title}\nVeri yok.")
+                        return
+
+                    # Kişi bazında ortalama hata hesapla (MAE)
+                    leaderboard = valid_df.groupby('gorunen_isim')[err_col].agg(['mean', 'count']).reset_index()
+                    leaderboard = leaderboard.sort_values(by=['mean', 'count'], ascending=[True, False]) # En düşük hata, en çok tahmin
+                    
+                    winner = leaderboard.iloc[0]
+                    
+                    col_obj.success(f"{icon} **{title}**\n\n"
+                                    f"🥇 **{winner['gorunen_isim']}**\n\n"
+                                    f"Ort. Sapma: **{winner['mean']:.2f} {unit}**\n"
+                                    f"Tahmin Sayısı: {int(winner['count'])}")
+
+                show_champion_card(c_best1, "PPK Faizi", "err_ppk", "Puan", "🏦")
+                show_champion_card(c_best2, "Aylık Enflasyon", "err_enf_ay", "Puan", "📉")
+                show_champion_card(c_best3, "Yıllık Enflasyon", "err_enf_yil", "Puan", "🏷️")
+                
+                st.caption(f"*Analiz {p_start} ile {p_end} arasındaki dönemleri kapsar. 'Ort. Sapma' (Mean Absolute Error) ne kadar düşükse o kadar iyidir.*")
+            else:
+                st.info("Seçilen tarih aralığında gerçekleşmiş veri bulunamadı.")
+        else:
+            st.warning("Gerçekleşen piyasa verileri çekilemediği için performans analizi yapılamıyor.")
+            
         st.markdown("---")
 
+        # --- MEVCUT FİLTRELER VE GRAFİKLER ---
         with st.sidebar:
             st.markdown("### 🔍 Dashboard Filtreleri")
             x_axis_mode = st.radio("Grafik Görünümü (X Ekseni)", ["📅 Hedef Dönem (Vade)", "⏳ Tahmin Tarihi (Revizyon)"])
@@ -725,18 +766,27 @@ elif page == "Dashboard":
             manual_median_val = 0.0 if calc_method == "Otomatik" else st.number_input("Manuel Değer", step=0.01, format="%.2f")
             st.markdown("---")
             cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
-            avail_src = sorted(df_latest[df_latest['kategori'].isin(cat_filter)]['anket_kaynagi'].astype(str).unique())
+            
+            # Filtre mantığı
+            df_filt_base = df_latest[df_latest['kategori'].isin(cat_filter)]
+            avail_src = sorted(df_filt_base['anket_kaynagi'].astype(str).unique())
             src_filter = st.multiselect("Kaynak", avail_src, default=avail_src)
-            avail_usr = sorted(df_latest[df_latest['kategori'].isin(cat_filter) & df_latest['anket_kaynagi'].isin(src_filter)]['gorunen_isim'].unique())
+            
+            df_filt_src = df_filt_base[df_filt_base['anket_kaynagi'].isin(src_filter)]
+            avail_usr = sorted(df_filt_src['gorunen_isim'].unique())
             usr_filter = st.multiselect("Katılımcı", avail_usr, default=avail_usr)
-            yr_filter = st.multiselect("Yıl", sorted(df_latest['yil'].unique()), default=sorted(df_latest['yil'].unique()))
+            
+            avail_yr = sorted(df_filt_src['yil'].unique())
+            yr_filter = st.multiselect("Yıl", avail_yr, default=avail_yr)
 
         is_single_user = (len(usr_filter) == 1)
         
         if is_single_user:
+            # Tek kullanıcı seçiliyse tarihçesini (revizyonlarını) görmek isteyebilir
             target_df = df_history[df_history['gorunen_isim'].isin(usr_filter) & df_history['yil'].isin(yr_filter)].copy()
             x_axis_col = "tahmin_tarihi"; x_label = "Tahmin Giriş Tarihi"; sort_col = "tahmin_tarihi"; tick_format = "%d-%m-%Y"
         else:
+            # Çoklu seçimde her kullanıcının son tahminini karşılaştırırız
             target_df = df_latest[
                 df_latest['kategori'].isin(cat_filter) & 
                 df_latest['anket_kaynagi'].isin(src_filter) & 
@@ -745,7 +795,7 @@ elif page == "Dashboard":
             ].copy()
             x_axis_col = "donem"; x_label = "Hedef Dönem"; sort_col = "donem_date"; tick_format = None
 
-        if target_df.empty: st.warning("Veri bulunamadı."); st.stop()
+        if target_df.empty: st.warning("Seçilen filtrelerde veri bulunamadı."); st.stop()
 
         tabs = st.tabs(["📈 Zaman Serisi", "📍 Dağılım Analizi", "📦 Kutu Grafiği"])
         
@@ -755,6 +805,7 @@ elif page == "Dashboard":
                 fig = px.line(chart_data, x=x_axis_col, y=y, color="gorunen_isim" if not is_single_user else "donem", markers=True, title=tit, hover_data=["hover_text"])
                 if tick_format: fig.update_xaxes(tickformat=tick_format)
                 
+                # Gerçekleşen Veriyi Ekleme Mantığı
                 if x_axis_mode.startswith("📅") and real_key and realized_dict:
                     real_df_data = []
                     for d, vals in realized_dict.items():
@@ -762,24 +813,26 @@ elif page == "Dashboard":
                             real_df_data.append({'donem': d, 'deger': vals[real_key]})
                     
                     if real_df_data:
-                        real_df = pd.DataFrame(real_df_data).sort_values('donem')
+                        real_df_p = pd.DataFrame(real_df_data).sort_values('donem')
+                        # Grafikteki tarih aralığına göre kes
                         min_d = chart_data['donem'].min()
                         max_d = chart_data['donem'].max()
-                        real_df = real_df[(real_df['donem'] >= min_d) & (real_df['donem'] <= max_d)]
+                        real_df_p = real_df_p[(real_df_p['donem'] >= min_d) & (real_df_p['donem'] <= max_d)]
                         
-                        if not real_df.empty:
+                        if not real_df_p.empty:
                             fig.add_trace(go.Scatter(
-                                x=real_df['donem'], y=real_df['deger'],
+                                x=real_df_p['donem'], y=real_df_p['deger'],
                                 mode='lines+markers', name='GERÇEKLEŞEN',
-                                line=dict(color='black', width=4), marker=dict(size=8, color='black')
+                                line=dict(color='black', width=4, dash='dot'), marker=dict(size=8, color='black', symbol='x')
                             ))
 
+                # Hata Çubukları (Min-Max Aralığı)
                 dfr = chart_data.dropna(subset=[min_c, max_c])
                 if not dfr.empty:
                     grp = "donem" if is_single_user else "gorunen_isim"
                     for g in dfr[grp].unique():
                         ud = dfr[dfr[grp] == g]
-                        fig.add_trace(go.Scatter(x=ud[x_axis_col], y=ud[y], mode='markers', error_y=dict(type='data', symmetric=False, array=ud[max_c]-ud[y], arrayminus=ud[y]-ud[min_c], color='gray', width=2), showlegend=False, hoverinfo='skip', marker=dict(size=0, opacity=0)))
+                        fig.add_trace(go.Scatter(x=ud[x_axis_col], y=ud[y], mode='markers', error_y=dict(type='data', symmetric=False, array=ud[max_c]-ud[y], arrayminus=ud[y]-ud[min_c], color='gray', width=1), showlegend=False, hoverinfo='skip', marker=dict(size=0, opacity=0)))
                 st.plotly_chart(fig, use_container_width=True)
             
             c1, c2 = st.columns(2); 
@@ -787,10 +840,11 @@ elif page == "Dashboard":
             with c2: plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
             c3, c4 = st.columns(2)
             with c3: plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay")
-            with c4: plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf", "enf_yil")
+            with c4: plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf (Veya Yıllık)", "enf_yil")
 
         with tabs[1]:
             pers = sorted(list(target_df['donem'].unique()), reverse=True)
+            if not pers: st.stop()
             tp = st.selectbox("Dönem Seç", pers, key="dp")
             dp = target_df[target_df['donem'] == tp].copy()
             met_map = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
@@ -805,9 +859,18 @@ elif page == "Dashboard":
                 fig.add_trace(go.Scatter(x=dp[mc], y=y_val, mode='markers', marker=dict(size=14, color='#1976D2', line=dict(width=1, color='white')), name='Tahmin', text=[f"%{v:.2f}" for v in dp[mc]], hoverinfo='text'))
                 fig.add_vline(x=mv, line_width=3, line_color="red")
                 fig.add_annotation(x=mv, y=-0.1, text=f"MEDYAN %{mv:.2f}", showarrow=False, font=dict(color="red", size=14, weight="bold"), yref="paper")
+                
+                # Gerçekleşen veri varsa onu da dikey çizgi olarak ekle
+                if realized_dict and tp in realized_dict:
+                     real_key_map = {"PPK": "ppk", "Ay Enf": "enf_ay", "YS Enf": "enf_yil"}
+                     rv = realized_dict[tp].get(real_key_map[sm])
+                     if rv is not None:
+                         fig.add_vline(x=rv, line_width=3, line_color="black", line_dash="dash")
+                         fig.add_annotation(x=rv, y=-0.2, text=f"GERÇEK %{rv:.2f}", showarrow=False, font=dict(color="black", size=12), yref="paper")
+
                 fig.update_layout(title=f"{sm} Dağılım ({tp})", height=max(500, len(dp)*35))
                 st.plotly_chart(fig, use_container_width=True)
-            else: st.info("Veri yok")
+            else: st.info("Bu metrik için veri yok")
 
         with tabs[2]:
             mb = {"PPK": "tahmin_ppk_faiz", "Ay Enf": "tahmin_aylik_enf", "YS Enf": "tahmin_yilsonu_enf"}
