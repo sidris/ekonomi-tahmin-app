@@ -558,17 +558,26 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
 
             # Filtreleme Seçenekleri
             with st.container():
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3, c4, c5 = st.columns(5)
                 sel_cat = c1.selectbox("Kategori", ["Tümü"] + list(df_full['kategori'].unique()))
                 sel_period = c2.selectbox("Dönem", ["Tümü"] + sorted(list(df_full['donem'].unique()), reverse=True))
                 sel_user = c3.selectbox("Katılımcı", ["Tümü"] + sorted(list(df_full['kullanici_adi'].unique())))
-                admin_mode = c4.toggle("🛠️ Yönetici Modu")
+                sort_option = c4.selectbox("Sıralama", ["Tarih (Yeniden Eskiye)", "Tarih (Eskiden Yeniye)", "Son Eklenen (ID)"])
+                admin_mode = c5.toggle("🛠️ Yönetici Modu")
 
             # Filtre Uygula
             df_f = df_full.copy()
             if sel_cat != "Tümü": df_f = df_f[df_f['kategori'] == sel_cat]
             if sel_period != "Tümü": df_f = df_f[df_f['donem'] == sel_period]
             if sel_user != "Tümü": df_f = df_f[df_f['kullanici_adi'] == sel_user]
+            
+            # Sıralama Uygula
+            if sort_option == "Tarih (Yeniden Eskiye)":
+                df_f = df_f.sort_values(by="tahmin_tarihi", ascending=False)
+            elif sort_option == "Tarih (Eskiden Yeniye)":
+                df_f = df_f.sort_values(by="tahmin_tarihi", ascending=True)
+            else: # Son Eklenen (ID)
+                df_f = df_f.sort_values(by="id", ascending=False)
             
             # --- YÖNETİCİ MODU KAPALI İSE (NORMAL GÖRÜNÜM) ---
             if not admin_mode:
@@ -582,7 +591,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                     **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c or "min" in c or "max" in c}
                 }
                 
-                st.dataframe(df_f[final_cols].sort_values(by="tahmin_tarihi", ascending=False), column_config=col_cfg, use_container_width=True, height=600)
+                st.dataframe(df_f[final_cols], column_config=col_cfg, use_container_width=True, height=600)
                 
                 if not df_f.empty:
                     df_ex = df_f.copy(); df_ex['tahmin_tarihi'] = df_ex['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
@@ -620,6 +629,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                             
                             # Helper
                             def g(k): return float(t.get(k) or 0)
+                            original_n = safe_int(t.get('katilimci_sayisi'))
                             
                             # --- SEKMELER (FAİZ VE ENFLASYON) ---
                             tp, te = st.tabs(["Faiz (PPK/YS)", "Enflasyon (Ay/Yıllık/YS)"])
@@ -634,7 +644,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                     ec1, ec2, ec3 = st.columns(3)
                                     mn_ppk = ec1.number_input("Min PPK", value=g('min_ppk_faiz'), step=0.25); mx_ppk = ec1.number_input("Max PPK", value=g('max_ppk_faiz'), step=0.25)
                                     mn_yf = ec2.number_input("Min YS Faiz", value=g('min_yilsonu_faiz'), step=0.25); mx_yf = ec2.number_input("Max YS Faiz", value=g('max_yilsonu_faiz'), step=0.25)
-                                    nk = ec3.number_input("Katılımcı Sayısı (N)", value=safe_int(t.get('katilimci_sayisi')), step=1)
+                                    nk_faiz = ec3.number_input("Katılımcı Sayısı (N)", value=original_n, step=1, key="nk_edit_faiz")
 
                                 # Parse Range Logic
                                 md, mn, mx, ok = parse_range_input(r_ppk, v_ppk)
@@ -649,11 +659,12 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 r_yil = c2.text_input("Aralık Yıllık", key="r_yil"); v_yil = c2.number_input("Medyan Yıllık", value=g('tahmin_yillik_enf'), step=0.01)
                                 r_ys = c3.text_input("Aralık YS", key="r_ys"); v_ys = c3.number_input("Medyan YS", value=g('tahmin_yilsonu_enf'), step=0.01)
                                 
-                                with st.expander("Detaylar (Min/Max)", expanded=True):
+                                with st.expander("Detaylar (Min/Max/N)", expanded=True):
                                     ec1, ec2, ec3 = st.columns(3)
                                     mn_ay = ec1.number_input("Min Ay", value=g('min_aylik_enf'), step=0.01); mx_ay = ec1.number_input("Max Ay", value=g('max_aylik_enf'), step=0.01)
                                     mn_yil = ec2.number_input("Min Yıllık", value=g('min_yillik_enf'), step=0.01); mx_yil = ec2.number_input("Max Yıllık", value=g('max_yillik_enf'), step=0.01)
                                     mn_ys = ec3.number_input("Min YS", value=g('min_yilsonu_enf'), step=0.01); mx_ys = ec3.number_input("Max YS", value=g('max_yilsonu_enf'), step=0.01)
+                                    nk_enf = st.number_input("Katılımcı Sayısı (N) - Enflasyon", value=original_n, step=1, key="nk_edit_enf")
 
                                 # Parse Range Logic
                                 md1, mn1, mx1, ok1 = parse_range_input(r_ay, v_ay)
@@ -681,12 +692,15 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                         return val
                                     except: return None
                                 
+                                # Katılımcı Sayısı Mantığı: Hangi sekmede değişiklik yapıldıysa onu al
+                                final_nk = nk_enf if nk_enf != original_n else nk_faiz
+                                
                                 # 1. Mevcut Kaydı Güncelle
                                 upd = {
                                     "tahmin_tarihi": nd.strftime('%Y-%m-%d'), 
                                     "donem": ndo, 
                                     "kaynak_link": nl if nl else None, 
-                                    "katilimci_sayisi": int(nk),
+                                    "katilimci_sayisi": int(final_nk),
                                     "tahmin_ppk_faiz": cv(v_ppk), "min_ppk_faiz": cv(mn_ppk), "max_ppk_faiz": cv(mx_ppk),
                                     "tahmin_yilsonu_faiz": cv(v_yf), "min_yilsonu_faiz": cv(mn_yf), "max_yilsonu_faiz": cv(mx_yf),
                                     "tahmin_aylik_enf": cv(v_ay), "min_aylik_enf": cv(mn_ay), "max_aylik_enf": cv(mx_ay),
@@ -698,7 +712,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 # 2. İleri Vadeli Kayıt Ekle (Varsa)
                                 if future_val_enf > 0 or future_val_ppk > 0:
                                     future_data = {
-                                        "katilimci_sayisi": int(nk)
+                                        "katilimci_sayisi": int(final_nk)
                                     }
                                     if future_val_enf > 0:
                                         future_data["tahmin_yilsonu_enf"] = future_val_enf
@@ -723,8 +737,8 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                     else:
                         # --- LİSTE GÖRÜNÜMÜ (DÜZENLEME/SİLME BUTONLARIYLA) ---
                         st.markdown("---")
-                        df_f = df_f.sort_values(by="tahmin_tarihi", ascending=False)
                         
+                        # Tablo Başlıkları
                         h1, h2, h3, h4 = st.columns([2, 4, 1, 1])
                         h1.caption("Tarih")
                         h2.caption("Katılımcı / Dönem")
