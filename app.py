@@ -541,7 +541,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
     
     # Verileri Çek
-    res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
+    res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
     df_t = pd.DataFrame(res_t.data)
     
     if not df_t.empty:
@@ -695,8 +695,8 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
 elif page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
     
-    # Verileri Çek
-    res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
+    # Verileri Çek (Limit artırıldı)
+    res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
     df_t = pd.DataFrame(res_t.data)
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
     df_k = pd.DataFrame(res_k.data)
@@ -949,7 +949,7 @@ elif page == "Dashboard":
 # ========================================================
 elif page == "🔥 Isı Haritası":
     st.header("🔥 Tahmin Isı Haritası")
-    res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
+    res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
     df_t = pd.DataFrame(res_t.data)
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
     df_k = pd.DataFrame(res_k.data)
@@ -974,6 +974,7 @@ elif page == "🔥 Isı Haritası":
             all_periods = sorted(df_full['donem'].unique(), reverse=True)
             
             if view_mode.startswith("📅"):
+                # Gelecek dönemleri de içerecek şekilde sıralı liste
                 sel_periods = c3.multiselect("Hedef Dönemler", all_periods, default=all_periods[:6] if len(all_periods)>0 else [])
                 if not sel_users or not sel_periods: st.stop()
                 df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & df_full['donem'].isin(sel_periods)].copy()
@@ -1056,7 +1057,7 @@ elif page == "📈 Piyasa Verileri (EVDS)":
 # ========================================================
 elif page == "📄 Rapor Oluştur":
     st.header("📄 Profesyonel Rapor Oluşturucu")
-    res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
+    res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
     df_t = pd.DataFrame(res_t.data)
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
     df_k = pd.DataFrame(res_k.data)
