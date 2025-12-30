@@ -149,7 +149,7 @@ def to_excel(df):
     return output.getvalue()
 
 # =========================================================
-# YENİ VERİ ÇEKME MOTORU (EVDS FORMULAS DÜZELTİLDİ)
+# YENİ VERİ ÇEKME MOTORU
 # =========================================================
 
 def _evds_headers(api_key: str) -> dict:
@@ -535,22 +535,28 @@ def get_participant_selection():
     return name_map[sel], row['kategori'], sel
 
 # ========================================================
-# SAYFA: GELİŞMİŞ VERİ HAVUZU
+# SAYFA: GELİŞMİŞ VERİ HAVUZU (YÖNETİM)
 # ========================================================
 if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
+    
+    # Verileri Çek
     res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
     df_t = pd.DataFrame(res_t.data)
+    
     if not df_t.empty:
         df_t = clean_and_sort_data(df_t)
         res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "kategori", "anket_kaynagi").execute()
         df_k = pd.DataFrame(res_k.data)
+        
+        # Katılımcı bilgileriyle birleştir
         if not df_k.empty:
             df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
             df_full['kategori'] = df_full['kategori_y'].fillna('Bireysel')
             df_full['anket_kaynagi'] = df_full['anket_kaynagi'].fillna('-')
             df_full['tahmin_tarihi'] = pd.to_datetime(df_full['tahmin_tarihi'])
 
+            # Filtreleme Seçenekleri
             with st.container():
                 c1, c2, c3, c4 = st.columns(4)
                 sel_cat = c1.selectbox("Kategori", ["Tümü"] + list(df_full['kategori'].unique()))
@@ -558,52 +564,77 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                 sel_user = c3.selectbox("Katılımcı", ["Tümü"] + sorted(list(df_full['kullanici_adi'].unique())))
                 admin_mode = c4.toggle("🛠️ Yönetici Modu")
 
+            # Filtre Uygula
             df_f = df_full.copy()
             if sel_cat != "Tümü": df_f = df_f[df_f['kategori'] == sel_cat]
             if sel_period != "Tümü": df_f = df_f[df_f['donem'] == sel_period]
             if sel_user != "Tümü": df_f = df_f[df_f['kullanici_adi'] == sel_user]
             
+            # --- NORMAL GÖRÜNÜM ---
             if not admin_mode:
                 st.markdown("---")
                 cols = ["tahmin_tarihi", "donem", "kullanici_adi", "kategori", "anket_kaynagi", "kaynak_link", "katilimci_sayisi", "tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "tahmin_yilsonu_faiz", "tahmin_aylik_enf", "tahmin_yillik_enf", "tahmin_yilsonu_enf"]
                 final_cols = [c for c in cols if c in df_f.columns]
-                col_cfg = {"kaynak_link": st.column_config.LinkColumn("Link", display_text="🔗"), "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"), **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c or "min" in c or "max" in c}}
+                
+                col_cfg = {
+                    "kaynak_link": st.column_config.LinkColumn("Link", display_text="🔗"), 
+                    "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"), 
+                    **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c or "min" in c or "max" in c}
+                }
+                
                 st.dataframe(df_f[final_cols].sort_values(by="tahmin_tarihi", ascending=False), column_config=col_cfg, use_container_width=True, height=600)
+                
                 if not df_f.empty:
                     df_ex = df_f.copy(); df_ex['tahmin_tarihi'] = df_ex['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
                     st.download_button("📥 Excel İndir", to_excel(df_ex), f"Veri_{sel_user}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+            
+            # --- YÖNETİCİ (EDİT) MODU ---
             else:
                 if 'admin_ok' not in st.session_state: st.session_state['admin_ok'] = False
+                
+                # Admin Girişi
                 if not st.session_state['admin_ok']:
                     with st.form("admin_login"):
-                        if st.form_submit_button("Giriş") and st.text_input("Şifre", type="password") == "Admin": st.session_state['admin_ok'] = True; st.rerun()
+                        if st.form_submit_button("Giriş") and st.text_input("Şifre", type="password") == "Admin": 
+                            st.session_state['admin_ok'] = True
+                            st.rerun()
                 else:
+                    # Bir kayıt düzenleniyor mu?
                     if 'edit_target' in st.session_state:
                         t = st.session_state['edit_target']
+                        
+                        # --- DÜZENLEME FORMU ---
                         with st.form("full_edit_form"):
                             st.subheader(f"Düzenle: {t['kullanici_adi']} ({t['donem']})")
+                            st.info("⚠️ Bu formdaki değişiklikler mevcut kaydın üzerine yazılır (Overwrite).")
+                            
                             c1, c2, c3 = st.columns(3)
                             nd = c1.date_input("Tarih", pd.to_datetime(t.get('tahmin_tarihi')).date())
                             ndo = c2.selectbox("Dönem", tum_donemler, index=tum_donemler.index(t['donem']) if t['donem'] in tum_donemler else 0)
                             nl = c3.text_input("Link", t.get('kaynak_link') or "")
                             
+                            # Mevcut değerleri float olarak al (hata önlemek için)
                             def g(k): return float(t.get(k) or 0)
-                            tp, te = st.tabs(["Faiz", "Enflasyon"])
+                            
+                            tp, te = st.tabs(["Faiz Verileri", "Enflasyon Verileri"])
                             with tp:
                                 c1, c2, c3 = st.columns(3)
-                                npk = c1.number_input("PPK", value=g('tahmin_ppk_faiz'), step=0.25)
-                                nyf = c2.number_input("YS Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25)
-                                nk = c3.number_input("N", value=safe_int(t.get('katilimci_sayisi')), step=1)
+                                npk = c1.number_input("PPK Tahmini", value=g('tahmin_ppk_faiz'), step=0.25)
+                                nyf = c2.number_input("Yıl Sonu Faiz", value=g('tahmin_yilsonu_faiz'), step=0.25)
+                                nk = c3.number_input("Katılımcı Sayısı (N)", value=safe_int(t.get('katilimci_sayisi')), step=1)
                             with te:
                                 c1, c2, c3 = st.columns(3)
-                                na = c1.number_input("Ay Enf", value=g('tahmin_aylik_enf'), step=0.1)
-                                nyillik = c2.number_input("Yıllık Enf", value=g('tahmin_yillik_enf'), step=0.1)
-                                nye = c3.number_input("YS Enf", value=g('tahmin_yilsonu_enf'), step=0.1)
+                                na = c1.number_input("Aylık Enflasyon", value=g('tahmin_aylik_enf'), step=0.01)
+                                nyillik = c2.number_input("Yıllık Enflasyon", value=g('tahmin_yillik_enf'), step=0.01)
+                                nye = c3.number_input("Yıl Sonu Enflasyon", value=g('tahmin_yilsonu_enf'), step=0.01)
                             
-                            if st.form_submit_button("Kaydet"):
+                            # KAYDET BUTONU VE İŞLEMİ
+                            if st.form_submit_button("💾 Değişiklikleri Kaydet (Üzerine Yaz)"):
+                                # Veri Tiplerini Temizle (JSON Hatasını Önler)
                                 def cv(v): 
                                     try:
                                         val = float(v)
+                                        # 0 veya NaN ise veritabanına NULL gönder
                                         if pd.isna(val) or val == 0: return None
                                         return val
                                     except: return None
@@ -612,28 +643,56 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                     "tahmin_tarihi": nd.strftime('%Y-%m-%d'), 
                                     "donem": ndo, 
                                     "kaynak_link": nl if nl else None, 
-                                    "katilimci_sayisi": int(nk),
+                                    "katilimci_sayisi": int(nk), # int() zorunlu
                                     "tahmin_ppk_faiz": cv(npk), 
                                     "tahmin_yilsonu_faiz": cv(nyf), 
                                     "tahmin_aylik_enf": cv(na), 
                                     "tahmin_yillik_enf": cv(nyillik), 
                                     "tahmin_yilsonu_enf": cv(nye)
                                 }
+                                
+                                # GÜNCELLEME KOMUTU (UPDATE)
+                                # .update() -> Sadece mevcut satırı günceller
+                                # .eq("id", ...) -> Sadece o ID'ye sahip satırı hedefler
                                 supabase.table(TABLE_TAHMIN).update(upd).eq("id", int(t['id'])).execute()
-                                del st.session_state['edit_target']; st.rerun()
-                        if st.button("İptal"): del st.session_state['edit_target']; st.rerun()
+                                
+                                st.success("Kayıt başarıyla güncellendi!")
+                                time.sleep(1) # Kullanıcı mesajı görsün
+                                del st.session_state['edit_target']
+                                st.rerun()
+
+                        if st.button("İptal"): 
+                            del st.session_state['edit_target']
+                            st.rerun()
+
+                    # --- LİSTE GÖRÜNÜMÜ ---
                     else:
                         st.markdown("---")
                         df_f = df_f.sort_values(by="tahmin_tarihi", ascending=False)
+                        
+                        # Tablo Başlıkları
+                        h1, h2, h3, h4 = st.columns([2, 4, 1, 1])
+                        h1.caption("Tarih")
+                        h2.caption("Katılımcı / Dönem")
+                        
                         for idx, row in df_f.iterrows():
                             with st.container():
-                                c1, c2, c3 = st.columns([6, 1, 1])
-                                c1.markdown(f"**{row['kullanici_adi']}** | {row['donem']}")
-                                if c2.button("✏️", key=f"e{row['id']}"): st.session_state['edit_target'] = row; st.rerun()
-                                if c3.button("🗑️", key=f"d{row['id']}"): supabase.table(TABLE_TAHMIN).delete().eq("id", int(row['id'])).execute(); st.rerun()
+                                c1, c2, c3, c4 = st.columns([2, 4, 1, 1])
+                                c1.write(row['tahmin_tarihi'].strftime('%d.%m.%Y'))
+                                c2.markdown(f"**{row['kullanici_adi']}** | {row['donem']}")
+                                
+                                # Düzenle Butonu
+                                if c3.button("✏️", key=f"e{row['id']}"): 
+                                    st.session_state['edit_target'] = row
+                                    st.rerun()
+                                
+                                # Sil Butonu
+                                if c4.button("🗑️", key=f"d{row['id']}"): 
+                                    supabase.table(TABLE_TAHMIN).delete().eq("id", int(row['id'])).execute()
+                                    st.rerun()
 
 # ========================================================
-# SAYFA: DASHBOARD
+# SAYFA: DASHBOARD (GÜNCELLENMİŞ PERFORMANS ANALİZİ İLE)
 # ========================================================
 elif page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
@@ -1120,56 +1179,114 @@ elif page == "Katılımcı Yönetimi":
             st.rerun()
 
 # ========================================================
-# SAYFA: VERİ GİRİŞ EKRANLARI (GÜNCELLENMİŞ UPSERT KULLANIR)
+# SAYFA: VERİ GİRİŞ EKRANLARI (MULTI-WRITE ÖZELLİKLİ)
 # ========================================================
 elif page in ["PPK Girişi", "Enflasyon Girişi"]:
     st.header(f"➕ {page}")
+    
     with st.container():
         with st.form("entry_form"):
+            # --- 1. ANA TAHMİN BİLGİLERİ ---
+            st.subheader("1. Ana Tahmin")
             c1, c2, c3 = st.columns([2, 1, 1])
             with c1: user, cat, disp = get_participant_selection()
-            with c2: donem = st.selectbox("Dönem", tum_donemler, index=tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0)
-            with c3: tarih = st.date_input("Tarih", datetime.date.today())
-            link = st.text_input("Link (Opsiyonel)")
+            
+            # Varsayılan dönem ayarı
+            def_idx = tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0
+            with c2: donem = st.selectbox("Dönem (Cari)", tum_donemler, index=def_idx)
+            with c3: tarih = st.date_input("Giriş Tarihi", datetime.date.today())
+            link = st.text_input("Kaynak Linki (Opsiyonel)")
+            
             st.markdown("---")
             data = {}; kat_sayisi = 0
             
+            # --- 2. VERİ GİRİŞ ALANLARI ---
             if page == "PPK Girişi":
                 c1, c2 = st.columns(2)
                 r1 = c1.text_input("Aralık (42-45)", key="r1"); v1 = c1.number_input("Medyan %", step=0.25)
                 r2 = c2.text_input("Aralık YS", key="r2"); v2 = c2.number_input("YS Medyan %", step=0.25)
-                with st.expander("Detaylar"):
+                with st.expander("Detaylar (Min/Max/N)"):
                     ec1, ec2, ec3 = st.columns(3)
                     mn1 = ec1.number_input("Min", step=0.25); mx1 = ec1.number_input("Max", step=0.25)
                     mn2 = ec2.number_input("Min YS", step=0.25); mx2 = ec2.number_input("Max YS", step=0.25)
                     kat_sayisi = ec3.number_input("N", step=1)
+                
+                # Parse
                 md, mn, mx, ok = parse_range_input(r1, v1); 
                 if ok: v1, mn1, mx1 = md, mn, mx
                 md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
                 if ok2: v2, mn2, mx2 = md2, mn2, mx2
                 data = {"tahmin_ppk_faiz": v1, "min_ppk_faiz": mn1, "max_ppk_faiz": mx1, "tahmin_yilsonu_faiz": v2, "min_yilsonu_faiz": mn2, "max_yilsonu_faiz": mx2}
-            else:
+                
+            else: # Enflasyon Girişi
                 c1, c2, c3 = st.columns(3)
-                r1 = c1.text_input("Aralık Ay", key="r1"); v1 = c1.number_input("Ay Medyan", step=0.1)
-                r2 = c2.text_input("Aralık Yıl", key="r2"); v2 = c2.number_input("Yıl Medyan", step=0.1)
-                r3 = c3.text_input("Aralık YS", key="r3"); v3 = c3.number_input("YS Medyan", step=0.1)
-                with st.expander("Detaylar"):
+                r1 = c1.text_input("Aralık Ay", key="r1"); v1 = c1.number_input("Ay Medyan", step=0.01, format="%.2f")
+                r2 = c2.text_input("Aralık Yıllık", key="r2"); v2 = c2.number_input("Yıllık Medyan", step=0.01, format="%.2f")
+                r3 = c3.text_input("Aralık YS", key="r3"); v3 = c3.number_input("YS Medyan", step=0.01, format="%.2f")
+                
+                with st.expander("Detaylar (Min/Max/N)"):
                     ec1, ec2, ec3 = st.columns(3)
-                    mn1 = ec1.number_input("Min Ay", step=0.1); mx1 = ec1.number_input("Max Ay", step=0.1)
-                    mn2 = ec2.number_input("Min Yıl", step=0.1); mx2 = ec2.number_input("Max Yıl", step=0.1)
-                    mn3 = ec3.number_input("Min YS", step=0.1); mx3 = ec3.number_input("Max YS", step=0.1)
+                    mn1 = ec1.number_input("Min Ay", step=0.01); mx1 = ec1.number_input("Max Ay", step=0.01)
+                    mn2 = ec2.number_input("Min Yıl", step=0.01); mx2 = ec2.number_input("Max Yıl", step=0.01)
+                    mn3 = ec3.number_input("Min YS", step=0.01); mx3 = ec3.number_input("Max YS", step=0.01)
                     kat_sayisi = st.number_input("N", step=1)
+                
+                # Parse
                 md1, mn1, mx1, ok1 = parse_range_input(r1, v1); 
                 if ok1: v1, mn1, mx1 = md1, mn1, mx1
                 md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
                 if ok2: v2, mn2, mx2 = md2, mn2, mx2
                 md3, mn3, mx3, ok3 = parse_range_input(r3, v3)
                 if ok3: v3, mn3, mx3 = md3, mn3, mx3
-                data = {"tahmin_aylik_enf": v1, "min_aylik_enf": mn1, "max_aylik_enf": mx1, "tahmin_yillik_enf": v2, "min_yillik_enf": mn2, "max_yillik_enf": mx2, "tahmin_yilsonu_enf": v3, "min_yilsonu_enf": mn3, "max_yilsonu_enf": mx3}
+                
+                data = {
+                    "tahmin_aylik_enf": v1, "min_aylik_enf": mn1, "max_aylik_enf": mx1, 
+                    "tahmin_yillik_enf": v2, "min_yillik_enf": mn2, "max_yillik_enf": mx2, 
+                    "tahmin_yilsonu_enf": v3, "min_yilsonu_enf": mn3, "max_yilsonu_enf": mx3
+                }
 
             data["katilimci_sayisi"] = int(kat_sayisi) if kat_sayisi > 0 else 0
+
+            # --- 3. EKSTRA: GELECEK YIL TAHMİNİ (Sadece Enflasyonda Mantıklı) ---
+            extra_future_data = None
+            future_donem = None
+            
+            if page == "Enflasyon Girişi":
+                st.markdown("---")
+                st.markdown("#### 📅 İleri Vadeli Beklenti (Opsiyonel)")
+                st.caption("Örn: Şu an 2025 Ekim giriyorsunuz ama raporda 2026 Yıl Sonu tahmini de var. Onu buraya girin.")
+                
+                fe1, fe2 = st.columns(2)
+                # Otomatik olarak bir sonraki yılın Aralığını seçmeye çalışalım
+                try:
+                    curr_year = int(donem.split('-')[0])
+                    next_december = f"{curr_year + 1}-12"
+                    f_idx = tum_donemler.index(next_december) if next_december in tum_donemler else 0
+                except: f_idx = 0
+                
+                future_donem = fe1.selectbox("Hedef Dönem (Gelecek)", tum_donemler, index=f_idx)
+                future_val = fe2.number_input("Gelecek Dönem Enflasyon Beklentisi (%)", step=0.01, format="%.2f")
+                
+                if future_val > 0:
+                    # Gelecek verisi genellikle Yıl Sonu Enflasyon veya Yıllık Enflasyon olarak kaydedilir.
+                    # İkisini de dolduruyoruz ki grafiklerde garanti görünsün.
+                    extra_future_data = {
+                        "tahmin_yilsonu_enf": future_val,
+                        "tahmin_yillik_enf": future_val,
+                        "katilimci_sayisi": int(kat_sayisi)
+                    }
+
+            # --- KAYDETME İŞLEMİ ---
             if st.form_submit_button("✅ Kaydet"):
-                if user: 
+                if user:
+                    # 1. Ana Tahmini Kaydet (Örn: 2025-10 için Aylık 1.5, Yıllık 30)
                     upsert_tahmin(user, donem, cat, tarih, link, data)
-                    st.toast("Kaydedildi!", icon="🎉")
-                else: st.error("Kullanıcı Seçiniz")
+                    
+                    # 2. Varsa Gelecek Tahmini Kaydet (Örn: 2026-12 için 25)
+                    if extra_future_data and future_donem:
+                        upsert_tahmin(user, future_donem, cat, tarih, link, extra_future_data)
+                        st.toast(f"Kaydedildi! (Ana Dönem: {donem} + İleri Dönem: {future_donem})", icon="🎉")
+                    else:
+                        st.toast(f"Kaydedildi! ({donem})", icon="🎉")
+                else: 
+                    st.error("Kullanıcı Seçiniz")
