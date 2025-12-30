@@ -652,8 +652,6 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                 }
                                 
                                 # GÜNCELLEME KOMUTU (UPDATE)
-                                # .update() -> Sadece mevcut satırı günceller
-                                # .eq("id", ...) -> Sadece o ID'ye sahip satırı hedefler
                                 supabase.table(TABLE_TAHMIN).update(upd).eq("id", int(t['id'])).execute()
                                 
                                 st.success("Kayıt başarıyla güncellendi!")
@@ -768,14 +766,13 @@ elif page == "Dashboard":
             
             if not target_real_df.empty:
                 # Tahminleri Gerçekleşenlerle Birleştir
-                # df_latest: Her katılımcının o dönem için verdiği son karar.
                 perf_df = pd.merge(df_latest, target_real_df, left_on="donem", right_on="Donem", how="inner")
                 
                 # Hata Hesaplamaları (Mutlak Sapma)
                 perf_df['err_ppk'] = (perf_df['tahmin_ppk_faiz'] - perf_df['PPK Faizi']).abs()
                 perf_df['err_enf_ay'] = (perf_df['tahmin_aylik_enf'] - perf_df['Aylık TÜFE']).abs()
                 
-                # Yıllık Enflasyon için: Eğer 'tahmin_yillik_enf' kolonu doluysa onu kullan, yoksa yıl sonunu dene
+                # Yıllık Enflasyon için kolon kontrolü
                 if 'tahmin_yillik_enf' in perf_df.columns:
                      perf_df['val_enf_yil'] = perf_df['tahmin_yillik_enf'].fillna(perf_df['tahmin_yilsonu_enf'])
                 else:
@@ -786,29 +783,41 @@ elif page == "Dashboard":
                 # --- KARTLARI OLUŞTUR ---
                 c_best1, c_best2, c_best3 = st.columns(3)
 
-                def show_champion_card(col_obj, title, err_col, unit, icon):
+                def show_champion_card(col_obj, title, err_col, unit, icon, pred_col, act_col):
                     # İlgili hatası boş olmayanları al
                     valid_df = perf_df.dropna(subset=[err_col])
                     if valid_df.empty:
                         col_obj.warning(f"{title}\nVeri yok.")
                         return
 
-                    # Kişi bazında ortalama hata hesapla (MAE)
-                    leaderboard = valid_df.groupby('gorunen_isim')[err_col].agg(['mean', 'count']).reset_index()
-                    leaderboard = leaderboard.sort_values(by=['mean', 'count'], ascending=[True, False]) # En düşük hata, en çok tahmin
+                    # İSTATİSTİK HESAPLAMA:
+                    # Grupla: İsim
+                    # Hesapla: Hata Ortalaması, Tahmin Ortalaması, Gerçekleşen Ortalaması, Sayı
+                    leaderboard = valid_df.groupby('gorunen_isim').agg({
+                        err_col: 'mean',
+                        pred_col: 'mean',
+                        act_col: 'mean',
+                        'donem': 'count'
+                    }).reset_index()
+                    
+                    # Sıralama: En düşük hatadan en yükseğe
+                    leaderboard = leaderboard.sort_values(by=[err_col, 'donem'], ascending=[True, False])
                     
                     winner = leaderboard.iloc[0]
                     
+                    # Gösterim (Tek dönemse direkt değer, çoklu dönemse ortalama yazar)
                     col_obj.success(f"{icon} **{title}**\n\n"
                                     f"🥇 **{winner['gorunen_isim']}**\n\n"
-                                    f"Ort. Sapma: **{winner['mean']:.2f} {unit}**\n"
-                                    f"Tahmin Sayısı: {int(winner['count'])}")
+                                    f"Ort. Tahmin: **%{winner[pred_col]:.2f}**\n"
+                                    f"Ort. Gerçek: **%{winner[act_col]:.2f}**\n"
+                                    f"Ort. Sapma: **{winner[err_col]:.2f} {unit}**")
 
-                show_champion_card(c_best1, "PPK Faizi", "err_ppk", "Puan", "🏦")
-                show_champion_card(c_best2, "Aylık Enflasyon", "err_enf_ay", "Puan", "📉")
-                show_champion_card(c_best3, "Yıllık Enflasyon", "err_enf_yil", "Puan", "🏷️")
+                # Kartları Çağır (Tahmin Kolonu ve Gerçekleşen Kolonu argümanlarını ekledik)
+                show_champion_card(c_best1, "PPK Faizi", "err_ppk", "Puan", "🏦", "tahmin_ppk_faiz", "PPK Faizi")
+                show_champion_card(c_best2, "Aylık Enflasyon", "err_enf_ay", "Puan", "📉", "tahmin_aylik_enf", "Aylık TÜFE")
+                show_champion_card(c_best3, "Yıllık Enflasyon", "err_enf_yil", "Puan", "🏷️", "val_enf_yil", "Yıllık TÜFE")
                 
-                st.caption(f"*Analiz {p_start} ile {p_end} arasındaki dönemleri kapsar. 'Ort. Sapma' (Mean Absolute Error) ne kadar düşükse o kadar iyidir.*")
+                st.caption(f"*Analiz {p_start} ile {p_end} arasındaki dönemleri kapsar.*")
             else:
                 st.info("Seçilen tarih aralığında gerçekleşmiş veri bulunamadı.")
         else:
@@ -841,11 +850,9 @@ elif page == "Dashboard":
         is_single_user = (len(usr_filter) == 1)
         
         if is_single_user:
-            # Tek kullanıcı seçiliyse tarihçesini (revizyonlarını) görmek isteyebilir
             target_df = df_history[df_history['gorunen_isim'].isin(usr_filter) & df_history['yil'].isin(yr_filter)].copy()
             x_axis_col = "tahmin_tarihi"; x_label = "Tahmin Giriş Tarihi"; sort_col = "tahmin_tarihi"; tick_format = "%d-%m-%Y"
         else:
-            # Çoklu seçimde her kullanıcının son tahminini karşılaştırırız
             target_df = df_latest[
                 df_latest['kategori'].isin(cat_filter) & 
                 df_latest['anket_kaynagi'].isin(src_filter) & 
@@ -1179,7 +1186,7 @@ elif page == "Katılımcı Yönetimi":
             st.rerun()
 
 # ========================================================
-# SAYFA: VERİ GİRİŞ EKRANLARI (MULTI-WRITE ÖZELLİKLİ)
+# SAYFA: VERİ GİRİŞ EKRANLARI (MULTI-WRITE ÖZELLİKLİ - PPK & ENFLASYON)
 # ========================================================
 elif page in ["PPK Girişi", "Enflasyon Girişi"]:
     st.header(f"➕ {page}")
@@ -1191,7 +1198,7 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             c1, c2, c3 = st.columns([2, 1, 1])
             with c1: user, cat, disp = get_participant_selection()
             
-            # Varsayılan dönem ayarı
+            # Varsayılan dönem ayarı (Bir sonraki ayı yakalamaya çalışır)
             def_idx = tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0
             with c2: donem = st.selectbox("Dönem (Cari)", tum_donemler, index=def_idx)
             with c3: tarih = st.date_input("Giriş Tarihi", datetime.date.today())
@@ -1200,7 +1207,7 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             st.markdown("---")
             data = {}; kat_sayisi = 0
             
-            # --- 2. VERİ GİRİŞ ALANLARI ---
+            # --- 2. VERİ GİRİŞ ALANLARI (ANA) ---
             if page == "PPK Girişi":
                 c1, c2 = st.columns(2)
                 r1 = c1.text_input("Aralık (42-45)", key="r1"); v1 = c1.number_input("Medyan %", step=0.25)
@@ -1211,7 +1218,7 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                     mn2 = ec2.number_input("Min YS", step=0.25); mx2 = ec2.number_input("Max YS", step=0.25)
                     kat_sayisi = ec3.number_input("N", step=1)
                 
-                # Parse
+                # Parse Range Input
                 md, mn, mx, ok = parse_range_input(r1, v1); 
                 if ok: v1, mn1, mx1 = md, mn, mx
                 md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
@@ -1231,7 +1238,7 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                     mn3 = ec3.number_input("Min YS", step=0.01); mx3 = ec3.number_input("Max YS", step=0.01)
                     kat_sayisi = st.number_input("N", step=1)
                 
-                # Parse
+                # Parse Range Input
                 md1, mn1, mx1, ok1 = parse_range_input(r1, v1); 
                 if ok1: v1, mn1, mx1 = md1, mn1, mx1
                 md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
@@ -1247,29 +1254,38 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
 
             data["katilimci_sayisi"] = int(kat_sayisi) if kat_sayisi > 0 else 0
 
-            # --- 3. EKSTRA: GELECEK YIL TAHMİNİ (Sadece Enflasyonda Mantıklı) ---
+            # --- 3. EKSTRA: GELECEK YIL TAHMİNİ (ORTAK ALAN) ---
             extra_future_data = None
             future_donem = None
             
-            if page == "Enflasyon Girişi":
-                st.markdown("---")
-                st.markdown("#### 📅 İleri Vadeli Beklenti (Opsiyonel)")
-                st.caption("Örn: Şu an 2025 Ekim giriyorsunuz ama raporda 2026 Yıl Sonu tahmini de var. Onu buraya girin.")
-                
-                fe1, fe2 = st.columns(2)
-                # Otomatik olarak bir sonraki yılın Aralığını seçmeye çalışalım
-                try:
-                    curr_year = int(donem.split('-')[0])
-                    next_december = f"{curr_year + 1}-12"
-                    f_idx = tum_donemler.index(next_december) if next_december in tum_donemler else 0
-                except: f_idx = 0
-                
-                future_donem = fe1.selectbox("Hedef Dönem (Gelecek)", tum_donemler, index=f_idx)
-                future_val = fe2.number_input("Gelecek Dönem Enflasyon Beklentisi (%)", step=0.01, format="%.2f")
-                
+            st.markdown("---")
+            st.markdown("#### 📅 İleri Vadeli Beklenti (Opsiyonel)")
+            st.caption("Örn: Rapor şu anki ayı (Ekim) ele alıyor ama 'Gelecek Yıl Sonu' için de bir tahmin içeriyor.")
+            
+            fe1, fe2 = st.columns(2)
+            
+            # Otomatik olarak bir sonraki yılın Aralığını seçmeye çalışalım
+            try:
+                curr_year = int(donem.split('-')[0])
+                next_december = f"{curr_year + 1}-12"
+                f_idx = tum_donemler.index(next_december) if next_december in tum_donemler else 0
+            except: f_idx = 0
+            
+            future_donem = fe1.selectbox("Hedef Dönem (Gelecek)", tum_donemler, index=f_idx)
+            
+            if page == "PPK Girişi":
+                future_val = fe2.number_input("Gelecek Dönem Politika Faizi Beklentisi (%)", step=0.25, format="%.2f")
                 if future_val > 0:
-                    # Gelecek verisi genellikle Yıl Sonu Enflasyon veya Yıllık Enflasyon olarak kaydedilir.
-                    # İkisini de dolduruyoruz ki grafiklerde garanti görünsün.
+                    # PPK için ileri vadeli tahmin hem o ayın faizi hem de (muhtemelen yıl sonu ise) yıl sonu faizi olarak girilir.
+                    extra_future_data = {
+                        "tahmin_ppk_faiz": future_val,
+                        "tahmin_yilsonu_faiz": future_val,
+                        "katilimci_sayisi": int(kat_sayisi)
+                    }
+            
+            else: # Enflasyon
+                future_val = fe2.number_input("Gelecek Dönem Enflasyon Beklentisi (%)", step=0.01, format="%.2f")
+                if future_val > 0:
                     extra_future_data = {
                         "tahmin_yilsonu_enf": future_val,
                         "tahmin_yillik_enf": future_val,
@@ -1279,11 +1295,11 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             # --- KAYDETME İŞLEMİ ---
             if st.form_submit_button("✅ Kaydet"):
                 if user:
-                    # 1. Ana Tahmini Kaydet (Örn: 2025-10 için Aylık 1.5, Yıllık 30)
+                    # 1. Ana Tahmini Kaydet
                     upsert_tahmin(user, donem, cat, tarih, link, data)
                     
-                    # 2. Varsa Gelecek Tahmini Kaydet (Örn: 2026-12 için 25)
-                    if extra_future_data and future_donem:
+                    # 2. Varsa Gelecek Tahmini Kaydet
+                    if extra_future_data and future_donem and future_val > 0:
                         upsert_tahmin(user, future_donem, cat, tarih, link, extra_future_data)
                         st.toast(f"Kaydedildi! (Ana Dönem: {donem} + İleri Dönem: {future_donem})", icon="🎉")
                     else:
