@@ -1083,4 +1083,30 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                 md, mn, mx, ok = parse_range_input(r1, v1); 
                 if ok: v1, mn1, mx1 = md, mn, mx
                 md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
-                if ok2: v2, mn2, mx2 = md2,
+                if ok2: v2, mn2, mx2 = md2, mn2, mx2
+                data = {"tahmin_ppk_faiz": v1, "min_ppk_faiz": mn1, "max_ppk_faiz": mx1, "tahmin_yilsonu_faiz": v2, "min_yilsonu_faiz": mn2, "max_yilsonu_faiz": mx2}
+            else:
+                c1, c2, c3 = st.columns(3)
+                r1 = c1.text_input("Aralık Ay", key="r1"); v1 = c1.number_input("Ay Medyan", step=0.1)
+                r2 = c2.text_input("Aralık Yıl", key="r2"); v2 = c2.number_input("Yıl Medyan", step=0.1)
+                r3 = c3.text_input("Aralık YS", key="r3"); v3 = c3.number_input("YS Medyan", step=0.1)
+                with st.expander("Detaylar"):
+                    ec1, ec2, ec3 = st.columns(3)
+                    mn1 = ec1.number_input("Min Ay", step=0.1); mx1 = ec1.number_input("Max Ay", step=0.1)
+                    mn2 = ec2.number_input("Min Yıl", step=0.1); mx2 = ec2.number_input("Max Yıl", step=0.1)
+                    mn3 = ec3.number_input("Min YS", step=0.1); mx3 = ec3.number_input("Max YS", step=0.1)
+                    kat_sayisi = st.number_input("N", step=1)
+                md1, mn1, mx1, ok1 = parse_range_input(r1, v1); 
+                if ok1: v1, mn1, mx1 = md1, mn1, mx1
+                md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
+                if ok2: v2, mn2, mx2 = md2, mn2, mx2
+                md3, mn3, mx3, ok3 = parse_range_input(r3, v3)
+                if ok3: v3, mn3, mx3 = md3, mn3, mx3
+                data = {"tahmin_aylik_enf": v1, "min_aylik_enf": mn1, "max_aylik_enf": mx1, "tahmin_yillik_enf": v2, "min_yillik_enf": mn2, "max_yillik_enf": mx2, "tahmin_yilsonu_enf": v3, "min_yilsonu_enf": mn3, "max_yilsonu_enf": mx3}
+
+            data["katilimci_sayisi"] = int(kat_sayisi) if kat_sayisi > 0 else 0
+            if st.form_submit_button("✅ Kaydet"):
+                if user: 
+                    upsert_tahmin(user, donem, cat, tarih, link, data)
+                    st.toast("Kaydedildi!", icon="🎉")
+                else: st.error("Kullanıcı Seçiniz")
