@@ -27,7 +27,6 @@ st.markdown("""
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; } 
     div[data-testid="stDataFrame"] { width: 100%; }
     
-    /* Login Ekranı */
     .login-container {
         background-color: white;
         padding: 3rem;
@@ -60,8 +59,6 @@ try:
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
-    
-    # E-posta Ayarları
     SMTP_EMAIL = st.secrets.get("SMTP_EMAIL", None)
     SMTP_PASSWORD = st.secrets.get("SMTP_PASSWORD", None)
     
@@ -123,55 +120,26 @@ def parse_range_input(text_input, default_median=0.0):
     return default_median, 0.0, 0.0, False
 
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
-    # Tarih formatını garanti altına al (YYYY-MM-DD)
-    if isinstance(forecast_date, str):
-        date_str = forecast_date
-    else:
-        date_str = forecast_date.strftime("%Y-%m-%d")
+    if isinstance(forecast_date, str): date_str = forecast_date
+    else: date_str = forecast_date.strftime("%Y-%m-%d")
     
-    # 1. Mevcut kaydı kontrol et (Çakışma Kontrolü)
-    # Supabase'e gönderirken tarih string olmalı
-    check_res = supabase.table(TABLE_TAHMIN).select("*")\
-        .eq("kullanici_adi", user)\
-        .eq("donem", period)\
-        .eq("tahmin_tarihi", date_str)\
-        .execute()
-    
-    existing_data = {}
-    record_id = None
-    
+    check_res = supabase.table(TABLE_TAHMIN).select("*").eq("kullanici_adi", user).eq("donem", period).execute()
+    existing_data = {}; record_id = None
     if check_res.data:
-        # Kayıt bulundu, ID'sini al
-        existing_data = check_res.data[0]
-        record_id = existing_data['id']
-        # Supabase'den gelen sistem alanlarını temizle (update için)
+        existing_data = check_res.data[0]; record_id = existing_data['id']
         for k in ['id', 'created_at', 'kullanici_adi', 'donem']: 
             if k in existing_data: del existing_data[k]
 
-    # 2. Yeni gelen verideki 0 veya boş değerleri temizle
     new_input_data = {k: v for k, v in data_dict.items() if v is not None and v != 0 and v != ""}
-    
-    # 3. Eski veri ile yeniyi birleştir
     final_data = existing_data.copy()
     final_data.update(new_input_data)
-    
-    # Zorunlu alanları ekle/güncelle
-    final_data.update({
-        "kullanici_adi": user, 
-        "donem": period, 
-        "kategori": category, 
-        "tahmin_tarihi": date_str
-    })
-    
+    final_data.update({"kullanici_adi": user, "donem": period, "kategori": category, "tahmin_tarihi": date_str})
     if link: final_data["kaynak_link"] = link
 
-    # 4. Kayıt veya Güncelleme
     if record_id:
-        # ID varsa GÜNCELLE (UPDATE)
         supabase.table(TABLE_TAHMIN).update(final_data).eq("id", record_id).execute()
         return "updated"
     else:
-        # ID yoksa EKLE (INSERT)
         supabase.table(TABLE_TAHMIN).insert(final_data).execute()
         return "inserted"
 
@@ -180,30 +148,26 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-def send_verification_email(code):
-    if not SMTP_EMAIL or not SMTP_PASSWORD:
-        return False, "SMTP Ayarları eksik! secrets.toml kontrol ediniz."
+def send_verification_email(code, action_desc="Veri Silme"):
+    if not SMTP_EMAIL or not SMTP_PASSWORD: return False, "SMTP Ayarları eksik!"
     try:
-        msg = MIMEText(f"SİLME ONAY KODU: {code}")
-        msg['Subject'] = '🚨 VERİ SİLME ONAYI'
+        msg = MIMEText(f"Finansal Tahmin Terminali İşlem Onay Kodu ({action_desc}): {code}")
+        msg['Subject'] = f'🚨 ONAY KODU: {action_desc}'
         msg['From'] = SMTP_EMAIL
         msg['To'] = "s.idrisoglu@gmail.com"
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.sendmail(SMTP_EMAIL, "s.idrisoglu@gmail.com", msg.as_string())
         return True, "Kod gönderildi."
-    except Exception as e:
-        return False, f"Hata: {str(e)}"
+    except Exception as e: return False, f"Hata: {str(e)}"
 
 # =========================================================
 # VERİ ÇEKME MOTORU
 # =========================================================
-def _evds_headers(api_key: str) -> dict:
-    return {"key": api_key, "User-Agent": "Mozilla/5.0"}
+def _evds_headers(api_key: str) -> dict: return {"key": api_key, "User-Agent": "Mozilla/5.0"}
 
 def _evds_url_single(series_code: str, start_date: datetime.date, end_date: datetime.date, formulas: int | None) -> str:
-    s = start_date.strftime("%d-%m-%Y")
-    e = end_date.strftime("%d-%m-%Y")
+    s = start_date.strftime("%d-%m-%Y"); e = end_date.strftime("%d-%m-%Y")
     url = f"{EVDS_BASE}/series={series_code}&startDate={s}&endDate={e}&type=json"
     if formulas is not None: url += f"&formulas={int(formulas)}"
     return url
@@ -217,8 +181,7 @@ def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_
             url = _evds_url_single(EVDS_TUFE_SERIES, start_date, end_date, formulas=formulas)
             r = requests.get(url, headers=_evds_headers(api_key), timeout=25)
             if r.status_code != 200: continue
-            js = r.json()
-            items = js.get("items", [])
+            js = r.json(); items = js.get("items", [])
             if not items: continue
             df = pd.DataFrame(items)
             if "Tarih" not in df.columns: continue
@@ -229,9 +192,7 @@ def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_
             val_cols = [c for c in df.columns if c not in ["Tarih", "UNIXTIME", "Tarih_dt", "Donem"]]
             if not val_cols: continue
             results[out_col] = pd.DataFrame({"Tarih": df["Tarih_dt"].dt.strftime("%d-%m-%Y"), "Donem": df["Donem"], out_col: pd.to_numeric(df[val_cols[0]], errors="coerce")})
-
-        df_m = results.get("TUFE_Aylik", pd.DataFrame())
-        df_y = results.get("TUFE_Yillik", pd.DataFrame())
+        df_m = results.get("TUFE_Aylik", pd.DataFrame()); df_y = results.get("TUFE_Yillik", pd.DataFrame())
         if df_m.empty and df_y.empty: return pd.DataFrame(), "Veri bulunamadı."
         if df_m.empty: out = df_y
         elif df_y.empty: out = df_m
@@ -249,11 +210,8 @@ def fetch_bis_cbpol_tr(start_date: datetime.date, end_date: datetime.date) -> tu
         df = pd.read_csv(io.StringIO(r.content.decode("utf-8", errors="ignore")))
         df.columns = [c.strip().upper() for c in df.columns]
         out = df[["TIME_PERIOD", "OBS_VALUE"]].copy()
-        out["TIME_PERIOD"] = pd.to_datetime(out["TIME_PERIOD"], errors="coerce")
-        out = out.dropna(subset=["TIME_PERIOD"])
-        out["Donem"] = out["TIME_PERIOD"].dt.strftime("%Y-%m")
-        out["Tarih"] = out["TIME_PERIOD"].dt.strftime("%d-%m-%Y")
-        out["REPO_RATE"] = pd.to_numeric(out["OBS_VALUE"], errors="coerce")
+        out["TIME_PERIOD"] = pd.to_datetime(out["TIME_PERIOD"], errors="coerce"); out = out.dropna(subset=["TIME_PERIOD"])
+        out["Donem"] = out["TIME_PERIOD"].dt.strftime("%Y-%m"); out["REPO_RATE"] = pd.to_numeric(out["OBS_VALUE"], errors="coerce")
         return out[["Donem", "REPO_RATE"]].sort_values(["Donem"]), None
     except Exception as e: return pd.DataFrame(), str(e)
 
@@ -325,14 +283,10 @@ def create_custom_pdf_report(report_data):
 
 def create_word_report(report_data):
     doc = Document()
-    title = doc.add_heading(report_data['title'], 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_info = doc.add_paragraph()
-    p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run_unit = p_info.add_run(report_data['unit'] + "\n")
-    run_unit.bold = True; run_unit.font.size = Pt(12)
-    run_date = p_info.add_run(report_data['date'])
-    run_date.italic = True
+    title = doc.add_heading(report_data['title'], 0); title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_info = doc.add_paragraph(); p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_unit = p_info.add_run(report_data['unit'] + "\n"); run_unit.bold = True; run_unit.font.size = Pt(12)
+    run_date = p_info.add_run(report_data['date']); run_date.italic = True
     doc.add_paragraph("")
     if report_data['body']: p_body = doc.add_paragraph(report_data['body']); p_body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     for block in report_data['content_blocks']:
@@ -351,13 +305,11 @@ def create_word_report(report_data):
             for _, row in df_table.iterrows():
                 row_cells = table.add_row().cells
                 for i, item in enumerate(row): row_cells[i].text = str(item)
-    output = io.BytesIO()
-    doc.save(output)
+    output = io.BytesIO(); doc.save(output)
     return output.getvalue()
 
 def create_excel_dashboard(df_source):
-    output = io.BytesIO()
-    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    output = io.BytesIO(); workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     bold = workbook.add_format({'bold': 1}); date_fmt = workbook.add_format({'num_format': 'dd/mm/yyyy'})
     ws_raw = workbook.add_worksheet("Ham Veri"); ws_raw.write_row('A1', df_source.columns, bold)
     for r, row in enumerate(df_source.values):
@@ -526,7 +478,6 @@ elif page == "Dashboard":
 
     if not df_t.empty and not df_k.empty:
         df_t = clean_and_sort_data(df_t)
-        # HATA DÜZELTME: NaT kontrolü (Dashboard'un çökmesini engeller)
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'], errors='coerce')
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
@@ -550,12 +501,9 @@ elif page == "Dashboard":
         c1, c2, c3 = st.columns(3)
         c1.metric("Toplam Katılımcı", df_latest['kullanici_adi'].nunique())
         c2.metric("Toplam Tahmin Verisi", len(df_latest))
-        
-        # HATA DÜZELTME: NaT kontrolü (Tarih yoksa tire koy)
         max_date = df_latest['tahmin_tarihi'].max()
         display_date = max_date.strftime('%d.%m.%Y') if pd.notnull(max_date) else "-"
         c3.metric("Son Güncelleme", display_date)
-        
         st.markdown("---")
 
         st.subheader("🏆 Dönemin En İsabetli Tahmincileri")
@@ -650,7 +598,6 @@ elif page == "Dashboard":
                 plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", "ppk")
             with c2:
                 plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
-                
             c3, c4 = st.columns(2)
             with c3:
                 plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay")
@@ -689,6 +636,105 @@ elif page == "Dashboard":
             st.plotly_chart(fig, use_container_width=True)
 
 # ========================================================
+# SAYFA: ISI HARİTASI
+# ========================================================
+elif page == "🔥 Isı Haritası":
+    st.header("🔥 Tahmin Isı Haritası")
+    res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
+    df_t = pd.DataFrame(res_t.data)
+    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
+    df_k = pd.DataFrame(res_k.data)
+
+    if not df_t.empty and not df_k.empty:
+        df_t = clean_and_sort_data(df_t)
+        df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
+        df_t = df_t.sort_values(by='tahmin_tarihi')
+        df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+        df_full['gorunen_isim'] = df_full.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
+
+        with st.expander("⚙️ Harita Ayarları", expanded=True):
+            view_mode = st.radio("Görünüm Modu", ["📅 Hedef Dönem Karşılaştırması", "⏳ Zaman İçindeki Değişim (Revizyon)"], horizontal=True)
+            st.markdown("---")
+            c1, c2, c3 = st.columns(3)
+            metrics = {"PPK Faizi": "tahmin_ppk_faiz", "Yıl Sonu Faiz": "tahmin_yilsonu_faiz", "Aylık Enflasyon": "tahmin_aylik_enf", "Yıl Sonu Enflasyon": "tahmin_yilsonu_enf"}
+            sel_metric_label = c1.selectbox("Veri Seti", list(metrics.keys()))
+            sel_metric = metrics[sel_metric_label]
+            
+            all_users = sorted(df_full['gorunen_isim'].unique())
+            sel_users = c2.multiselect("Katılımcılar", all_users, default=all_users[:10] if len(all_users)>0 else [])
+            all_periods = sorted(df_full['donem'].unique(), reverse=True)
+            
+            if view_mode.startswith("📅"):
+                sel_periods = c3.multiselect("Hedef Dönemler", all_periods, default=all_periods[:6] if len(all_periods)>0 else [])
+                if not sel_users or not sel_periods: st.stop()
+                df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & df_full['donem'].isin(sel_periods)].copy()
+                df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
+                piv_col = 'donem'
+            else:
+                target_period = c3.selectbox("Hangi Hedefin Geçmişini İzliceksiniz?", all_periods)
+                time_granularity = c3.radio("Zaman Dilimi", ["🗓️ Aylık (Son Veri)", "📆 Günlük (Detaylı)"])
+                if not sel_users or not target_period: st.stop()
+                df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & (df_full['donem'] == target_period)].copy()
+                if "Günlük" in time_granularity: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
+                else: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
+                df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'tahmin_zaman'], keep='last')
+                piv_col = 'tahmin_zaman'
+
+        if df_f.empty: st.warning("Veri yok."); st.stop()
+        pivot_df = df_f.pivot(index='gorunen_isim', columns=piv_col, values=sel_metric)
+        pivot_df = pivot_df.reindex(columns=sorted(pivot_df.columns))
+
+        def highlight(data):
+            styles = pd.DataFrame('', index=data.index, columns=data.columns)
+            for idx, row in data.iterrows():
+                prev = None; first = False
+                for col in data.columns:
+                    val = row[col]
+                    if pd.isna(val): continue
+                    st = ''
+                    if not first: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'; first=True
+                    else:
+                        if prev is not None:
+                            if val > prev: st='background-color: #FFCDD2; color: #B71C1C; font-weight: bold; border: 1px solid white;'
+                            elif val < prev: st='background-color: #C8E6C9; color: #1B5E20; font-weight: bold; border: 1px solid white;'
+                            else: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'
+                    styles.at[idx, col] = st
+                    prev = val
+            return styles
+
+        st.markdown(f"### 🔥 {sel_metric_label} Analizi")
+        st.dataframe(pivot_df.style.apply(highlight, axis=None).format("{:.2f}"), use_container_width=True, height=len(sel_users)*50+100)
+        st.caption("🟡: İlk Veri / Değişim Yok | 🔴: Yükseliş | 🟢: Düşüş")
+    else: st.info("Veri yok.")
+
+# ========================================================
+# SAYFA: PIYASA VERILERI (EVDS & BIS - GÜNCELLENMİŞ)
+# ========================================================
+elif page == "📈 Piyasa Verileri (EVDS)":
+    st.header("📈 Gerçekleşen Piyasa Verileri (EVDS & BIS)")
+    st.info("Bu ekran TCMB EVDS (Enflasyon) ve BIS (Politika Faizi) kaynaklarından veri çeker.")
+    with st.sidebar:
+        st.markdown("### 📅 Tarih Aralığı")
+        sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
+        ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
+    
+    if EVDS_API_KEY:
+        with st.spinner("Veriler çekiliyor (EVDS & BIS)..."):
+            df_evds, err = fetch_market_data_adapter(EVDS_API_KEY, sd, ed)
+        if not df_evds.empty:
+            c1, c2 = st.columns([3, 1])
+            with c1: st.dataframe(df_evds, use_container_width=True, height=500)
+            with c2: st.download_button("📥 Excel İndir", to_excel(df_evds), "Piyasa_Verileri.xlsx", type="primary")
+            st.markdown("---")
+            c_g1, c_g2, c_g3 = st.columns(3)
+            if 'PPK Faizi' in df_evds.columns: c_g1.plotly_chart(px.line(df_evds, x='Donem', y='PPK Faizi', title="Politika Faizi (BIS)", markers=True), use_container_width=True)
+            if 'Aylık TÜFE' in df_evds.columns: c_g2.plotly_chart(px.line(df_evds, x='Donem', y='Aylık TÜFE', title="Aylık Enflasyon (EVDS)", markers=True), use_container_width=True)
+            if 'Yıllık TÜFE' in df_evds.columns: c_g3.plotly_chart(px.line(df_evds, x='Donem', y='Yıllık TÜFE', title="Yıllık Enflasyon (EVDS)", markers=True), use_container_width=True)
+        elif err: st.warning(f"Hata oluştu: {err}")
+        else: st.warning("Bu tarih aralığı için veri bulunamadı.")
+    else: st.error("Lütfen .streamlit/secrets.toml dosyasına EVDS_KEY ekleyiniz.")
+
+# ========================================================
 # SAYFA: TOPLU VERİ YÜKLEME (EXCEL)
 # ========================================================
 elif page == "📥 Toplu Veri Yükleme (Excel)":
@@ -696,7 +742,6 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
     st.info("Bu alandan çok sayıda veriyi Excel formatında yükleyebilirsiniz. Sistem mevcut kayıtları kontrol eder ve onayınızı ister.")
 
     def generate_excel_template():
-        # Güncellenmiş Şablon (Medyan, Min, Max alanları dahil)
         cols = [
             "Katılımcı Adı", "Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)", "Kategori", "Link", 
             "PPK Medyan", "PPK Min", "PPK Max", 
@@ -708,17 +753,7 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
             "Gelecek Hedef Dönem", "Gelecek Tahmin (Enf)", "Gelecek Tahmin (PPK)"
         ]
         df_temp = pd.DataFrame(columns=cols)
-        # Örnek Satır
-        df_temp.loc[0] = [
-            "Örnek Banka", "2025-10", "2025-10-15", "Kurumsal", "", 
-            45.0, 42.0, 48.0, 
-            40.0, 38.0, 42.0,
-            1.5, 1.2, 1.8,
-            30.0, 28.0, 32.0,
-            35.0, 33.0, 37.0,
-            15,
-            "2026-12", 25.0, 35.0
-        ]
+        df_temp.loc[0] = ["Örnek Banka", "2025-10", "2025-10-15", "Kurumsal", "", 45.0, 42.0, 48.0, 40.0, 38.0, 42.0, 1.5, 1.2, 1.8, 30.0, 28.0, 32.0, 35.0, 33.0, 37.0, 15, "2026-12", 25.0, 35.0]
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_temp.to_excel(writer, index=False, sheet_name='Veri_Girisi')
@@ -803,23 +838,12 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                                 try: v = float(val); return v if pd.notnull(v) else None
                                 except: return None
                             
-                            # GÜNCELLENMİŞ EXCEL SÜTUNLARI
                             data_main = {
-                                "tahmin_ppk_faiz": cv(row.get("PPK Medyan")),
-                                "min_ppk_faiz": cv(row.get("PPK Min")),
-                                "max_ppk_faiz": cv(row.get("PPK Max")),
-                                "tahmin_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Medyan")),
-                                "min_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Min")),
-                                "max_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Max")),
-                                "tahmin_aylik_enf": cv(row.get("Aylık Enf Medyan")),
-                                "min_aylik_enf": cv(row.get("Aylık Enf Min")),
-                                "max_aylik_enf": cv(row.get("Aylık Enf Max")),
-                                "tahmin_yillik_enf": cv(row.get("Yıllık Enf Medyan")),
-                                "min_yillik_enf": cv(row.get("Yıllık Enf Min")),
-                                "max_yillik_enf": cv(row.get("Yıllık Enf Max")),
-                                "tahmin_yilsonu_enf": cv(row.get("Yıl Sonu Enf Medyan")),
-                                "min_yilsonu_enf": cv(row.get("Yıl Sonu Enf Min")),
-                                "max_yilsonu_enf": cv(row.get("Yıl Sonu Enf Max")),
+                                "tahmin_ppk_faiz": cv(row.get("PPK Medyan")), "min_ppk_faiz": cv(row.get("PPK Min")), "max_ppk_faiz": cv(row.get("PPK Max")),
+                                "tahmin_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Medyan")), "min_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Min")), "max_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Max")),
+                                "tahmin_aylik_enf": cv(row.get("Aylık Enf Medyan")), "min_aylik_enf": cv(row.get("Aylık Enf Min")), "max_aylik_enf": cv(row.get("Aylık Enf Max")),
+                                "tahmin_yillik_enf": cv(row.get("Yıllık Enf Medyan")), "min_yillik_enf": cv(row.get("Yıllık Enf Min")), "max_yillik_enf": cv(row.get("Yıllık Enf Max")),
+                                "tahmin_yilsonu_enf": cv(row.get("Yıl Sonu Enf Medyan")), "min_yilsonu_enf": cv(row.get("Yıl Sonu Enf Min")), "max_yilsonu_enf": cv(row.get("Yıl Sonu Enf Max")),
                                 "katilimci_sayisi": int(cv(row.get("N Sayısı")) or 0)
                             }
                             upsert_tahmin(user, period, cat, forecast_date, link, data_main)
@@ -922,11 +946,52 @@ elif page == "Katılımcı Yönetimi":
         c_list, c_action = st.columns([2, 1])
         with c_list: st.subheader("Mevcut Katılımcılar"); st.dataframe(df_kat, use_container_width=True)
         with c_action:
-            st.subheader("🚫 Kişi Silme"); ks = st.selectbox("Silinecek Kişiyi Seç", df_kat["ad_soyad"].unique()); st.warning(f"Dikkat: '{ks}' silindiğinde, ona ait geçmiş tüm tahmin verileri de silinecektir.")
-            if st.button("🗑️ Kişiyi ve Verilerini Sil", type="primary"):
-                supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
-                supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
-                st.toast(f"{ks} ve tüm verileri silindi.", icon="👋"); time.sleep(1); st.rerun()
+            st.subheader("🚫 Kişi Silme"); ks = st.selectbox("Silinecek Kişiyi Seç", df_kat["ad_soyad"].unique())
+            
+            # --- TEKİL KULLANICI SİLME İÇİN OTP ---
+            if 'single_delete_stage' not in st.session_state: st.session_state['single_delete_stage'] = 0
+            
+            if st.session_state['single_delete_stage'] == 0:
+                if st.button("🗑️ Silme Talebi Oluştur"):
+                    st.session_state['single_delete_stage'] = 1
+                    st.session_state['target_user_to_delete'] = ks
+                    st.rerun()
+
+            elif st.session_state['single_delete_stage'] == 1:
+                st.warning(f"'{st.session_state['target_user_to_delete']}' silinecek. Onay kodu için yönetici şifresini girin.")
+                admin_pwd_single = st.text_input("Yönetici Şifresi", type="password", key="single_del_pwd")
+                
+                if st.button("Onay Kodu Gönder", key="single_send"):
+                    if admin_pwd_single == SITE_SIFRESI:
+                        otp_code = str(random.randint(100000, 999999))
+                        st.session_state['single_generated_otp'] = otp_code
+                        success, msg = send_verification_email(otp_code, f"Kişi Silme: {st.session_state['target_user_to_delete']}")
+                        if success:
+                            st.success("Onay kodu gönderildi.")
+                            st.session_state['single_delete_stage'] = 2
+                            st.rerun()
+                        else: st.error(f"E-posta hatası: {msg}")
+                    else: st.error("Hatalı Şifre")
+                if st.button("İptal", key="single_cancel_1"):
+                    st.session_state['single_delete_stage'] = 0
+                    st.rerun()
+
+            elif st.session_state['single_delete_stage'] == 2:
+                st.info("E-postanıza gelen kodu girin.")
+                user_otp_single = st.text_input("Onay Kodu", key="single_otp_input")
+                
+                if st.button("✅ ONAYLA VE SİL", type="primary", key="single_confirm"):
+                    if user_otp_single == st.session_state.get('single_generated_otp'):
+                        target = st.session_state['target_user_to_delete']
+                        supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", target).execute()
+                        supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", target).execute()
+                        st.success(f"{target} silindi."); time.sleep(2)
+                        st.session_state['single_delete_stage'] = 0
+                        st.rerun()
+                    else: st.error("Hatalı Kod")
+                if st.button("Vazgeç", key="single_cancel_2"):
+                    st.session_state['single_delete_stage'] = 0
+                    st.rerun()
 
     # 3. Orphan Data Temizliği
     st.markdown("---"); st.subheader("🛠️ Veritabanı Bakımı")
@@ -951,49 +1016,28 @@ elif page == "Katılımcı Yönetimi":
     st.markdown("---")
     with st.expander("🚨 TEHLİKE BÖLGESİ: TÜM VERİLERİ SİL"):
         st.error("Bu işlem veritabanındaki TÜM tahmin verilerini ve katılımcıları kalıcı olarak siler.")
-        
         if 'delete_stage' not in st.session_state: st.session_state['delete_stage'] = 0 
         
         if st.session_state['delete_stage'] == 0:
-            if st.button("🔥 Sıfırlama Talebi Oluştur"):
-                st.session_state['delete_stage'] = 1
-                st.rerun()
+            if st.button("🔥 Sıfırlama Talebi Oluştur"): st.session_state['delete_stage'] = 1; st.rerun()
         
         if st.session_state['delete_stage'] == 1:
             st.info("İşleme devam etmek için Yönetici Şifresini giriniz.")
             admin_pwd = st.text_input("Yönetici Şifresi", type="password")
-            
             if st.button("Onay Kodu Gönder"):
                 if admin_pwd == SITE_SIFRESI:
-                    otp_code = str(random.randint(100000, 999999))
-                    st.session_state['generated_otp'] = otp_code
-                    success, msg = send_verification_email(otp_code)
-                    if success:
-                        st.success(f"Onay kodu s.idrisoglu@gmail.com adresine gönderildi.")
-                        st.session_state['delete_stage'] = 2
-                        st.rerun()
-                    else:
-                        st.error(f"E-posta gönderilemedi: {msg}")
-                else:
-                    st.error("Hatalı Şifre!")
-            if st.button("İptal"):
-                st.session_state['delete_stage'] = 0
-                st.rerun()
+                    otp_code = str(random.randint(100000, 999999)); st.session_state['generated_otp'] = otp_code
+                    success, msg = send_verification_email(otp_code, "TÜM VERİLERİ SİLME"); 
+                    if success: st.success(f"Onay kodu s.idrisoglu@gmail.com adresine gönderildi."); st.session_state['delete_stage'] = 2; st.rerun()
+                    else: st.error(f"E-posta gönderilemedi: {msg}")
+                else: st.error("Hatalı Şifre!")
+            if st.button("İptal"): st.session_state['delete_stage'] = 0; st.rerun()
 
         if st.session_state['delete_stage'] == 2:
-            st.warning("Lütfen e-postanıza gelen 6 haneli kodu giriniz.")
-            user_otp = st.text_input("Onay Kodu")
-            
+            st.warning("Lütfen e-postanıza gelen 6 haneli kodu giriniz."); user_otp = st.text_input("Onay Kodu")
             if st.button("🔥 ONKAYLA VE SİL 🔥", type="primary"):
                 if user_otp == st.session_state.get('generated_otp'):
-                    supabase.table(TABLE_TAHMIN).delete().neq("id", 0).execute()
-                    supabase.table(TABLE_KATILIMCI).delete().neq("id", 0).execute()
-                    st.success("Tüm veriler başarıyla silindi ve sistem sıfırlandı.")
-                    st.session_state['delete_stage'] = 0
-                    time.sleep(3)
-                    st.rerun()
-                else:
-                    st.error("Hatalı onay kodu!")
-            if st.button("Vazgeç"):
-                st.session_state['delete_stage'] = 0
-                st.rerun()
+                    supabase.table(TABLE_TAHMIN).delete().neq("id", 0).execute(); supabase.table(TABLE_KATILIMCI).delete().neq("id", 0).execute()
+                    st.success("Tüm veriler başarıyla silindi ve sistem sıfırlandı."); st.session_state['delete_stage'] = 0; time.sleep(3); st.rerun()
+                else: st.error("Hatalı onay kodu!")
+            if st.button("Vazgeç"): st.session_state['delete_stage'] = 0; st.rerun()
