@@ -13,16 +13,33 @@ import time
 import requests
 import xlsxwriter
 
-# --- 1. AYARLAR VE TASARIM (EN BAŞTA OLMALI) ---
+# --- 1. AYARLAR VE TASARIM ---
 st.set_page_config(page_title="Finansal Tahmin Terminali", layout="wide", page_icon="📊", initial_sidebar_state="expanded")
 
+# --- CUSTOM CSS (Görsel İyileştirmeler) ---
 st.markdown("""
 <style>
+    /* Genel Kart Yapısı */
     .stMetric { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); } 
     .stButton button { width: 100%; border-radius: 8px; font-weight: 600; } 
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; background-color: white; } 
-    h1, h2, h3 { color: #2c3e50; } 
     div[data-testid="stDataFrame"] { width: 100%; }
+    
+    /* Login Ekranı Özelleştirmesi */
+    .login-container {
+        background-color: white;
+        padding: 3rem;
+        border-radius: 15px;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        text-align: center;
+        margin-top: 50px;
+    }
+    .login-header {
+        color: #1E3A8A;
+        font-family: 'Helvetica Neue', sans-serif;
+        font-weight: 700;
+        margin-bottom: 1.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -117,14 +134,13 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     if check_res.data:
         existing_data = check_res.data[0]
         record_id = existing_data['id']
-        # Supabase'den gelen sistem alanlarını temizle
         for k in ['id', 'created_at', 'kullanici_adi', 'donem']: 
             if k in existing_data: del existing_data[k]
 
     # 2. Yeni gelen verideki 0 veya boş değerleri temizle
     new_input_data = {k: v for k, v in data_dict.items() if v is not None and v != 0 and v != ""}
     
-    # 3. Eski veri ile yeniyi birleştir (Yeni veri baskındır)
+    # 3. Eski veri ile yeniyi birleştir
     final_data = existing_data.copy()
     final_data.update(new_input_data)
     
@@ -138,7 +154,6 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     if link:
         final_data["kaynak_link"] = link
 
-    # 4. Kayıt veya Güncelleme
     if record_id:
         supabase.table(TABLE_TAHMIN).update(final_data).eq("id", record_id).execute()
         return "updated"
@@ -185,7 +200,6 @@ def fetch_evds_tufe_monthly_yearly(api_key: str, start_date: datetime.date, end_
             df = pd.DataFrame(items)
             if "Tarih" not in df.columns: continue
             
-            # Tarih düzeltme
             df["Tarih_dt"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
             if df["Tarih_dt"].isnull().all():
                  df["Tarih_dt"] = pd.to_datetime(df["Tarih"], format="%Y-%m", errors="coerce")
@@ -243,9 +257,7 @@ def fetch_bis_cbpol_tr(start_date: datetime.date, end_date: datetime.date) -> tu
 
 # --- VERİ ADAPTÖRÜ ---
 def fetch_market_data_adapter(api_key, start_date, end_date):
-    # 1. Enflasyon (EVDS)
     df_inf, err1 = fetch_evds_tufe_monthly_yearly(api_key, start_date, end_date)
-    # 2. Faiz (BIS)
     df_pol, err2 = fetch_bis_cbpol_tr(start_date, end_date)
 
     if df_inf.empty and df_pol.empty:
@@ -442,16 +454,24 @@ def create_custom_pdf_report(report_data):
             pdf.ln(10)
     return bytes(pdf.output())
 
-# --- GİRİŞ (DÜZELTİLMİŞ) ---
+# --- LOGIN (GÜNCELLENMİŞ TASARIM) ---
 if 'giris_yapildi' not in st.session_state: st.session_state['giris_yapildi'] = False
 
 if not st.session_state['giris_yapildi']:
-    c1, c2, c3 = st.columns([1,2,1])
-    with c2:
-        st.markdown("### 🔐 Giriş Paneli")
-        # st.form kullanarak enter tuşunun çalışmasını ve state sorununu çözüyoruz.
+    # Ortalama için boş kolonlar
+    lc1, lc2, lc3 = st.columns([1, 2, 1])
+    
+    with lc2:
+        st.markdown("""
+        <div class="login-container">
+            <h1 class="login-header">📊 Finansal Tahmin Terminali</h1>
+            <p style="color: #666; margin-bottom: 20px;">Lütfen erişim için şifrenizi giriniz.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
         with st.form("login_form"):
             sifre_girdisi = st.text_input("Şifre", type="password")
+            st.markdown("<br>", unsafe_allow_html=True)
             giris_butonu = st.form_submit_button("Giriş Yap", type="primary")
             
             if giris_butonu:
@@ -460,7 +480,7 @@ if not st.session_state['giris_yapildi']:
                     st.rerun()
                 else:
                     st.error("Hatalı Şifre!")
-        st.stop()
+    st.stop()
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -678,10 +698,9 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                             st.rerun()
 
                     else:
-                        # --- LİSTE GÖRÜNÜMÜ (DÜZENLEME/SİLME BUTONLARIYLA) ---
+                        # --- LİSTE GÖRÜNÜMÜ ---
                         st.markdown("---")
                         
-                        # Tablo Başlıkları
                         h1, h2, h3, h4 = st.columns([2, 4, 1, 1])
                         h1.caption("Tarih")
                         h2.caption("Katılımcı / Dönem")
@@ -701,7 +720,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                                     st.rerun()
 
 # ========================================================
-# SAYFA: DASHBOARD (GÜNCELLENMİŞ PERFORMANS ANALİZİ İLE)
+# SAYFA: DASHBOARD
 # ========================================================
 elif page == "Dashboard":
     st.header("Piyasa Analiz Dashboardu")
@@ -713,18 +732,15 @@ elif page == "Dashboard":
     df_k = pd.DataFrame(res_k.data)
 
     if not df_t.empty and not df_k.empty:
-        # Temizlik
         df_t = clean_and_sort_data(df_t)
         df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
-        # Gerçekleşen Verileri Çek (Geniş Aralık)
         dash_evds_start = datetime.date(2023, 1, 1)
         dash_evds_end = datetime.date(2025, 12, 31)
         
         realized_df, err = fetch_market_data_adapter(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         
-        # Gerçekleşen veriyi sözlüğe çevir (Hızlı erişim için)
         realized_dict = {}
         if not realized_df.empty:
             for _, row in realized_df.iterrows():
@@ -734,9 +750,7 @@ elif page == "Dashboard":
                     'enf_yil': row.get('Yıllık TÜFE')
                 }
 
-        # Dataframe Birleştirme
         df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
-        # Her katılımcının ilgili dönem için verdiği SON tahmin (Revizyonlar elendi)
         df_latest_raw = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
         df_latest = pd.merge(df_latest_raw, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
         
@@ -747,14 +761,13 @@ elif page == "Dashboard":
             d['anket_kaynagi'] = d['anket_kaynagi'].fillna('-')
             d['yil'] = d['donem'].apply(lambda x: x.split('-')[0])
 
-        # Üst Metrikler
         c1, c2, c3 = st.columns(3)
         c1.metric("Toplam Katılımcı", df_latest['kullanici_adi'].nunique())
         c2.metric("Toplam Tahmin Verisi", len(df_latest))
         c3.metric("Son Güncelleme", df_latest['tahmin_tarihi'].max().strftime('%d.%m.%Y'))
         st.markdown("---")
 
-        # --- GELİŞMİŞ PERFORMANS ANALİZİ (EN İYİ TAHMİNCİLER) ---
+        # --- EN İYİ TAHMİNCİLER (MVP) ---
         st.subheader("🏆 Dönemin En İsabetli Tahmincileri")
         
         if not realized_df.empty:
@@ -762,28 +775,28 @@ elif page == "Dashboard":
             
             with st.expander("⚙️ Performans Analizi Ayarları (Tarih Aralığı)", expanded=True):
                 col_p1, col_p2 = st.columns(2)
-                # Varsayılan olarak son 3 dönemi seçelim (veya mevcutsa)
+                # Varsayılan Mantık: En az 1 dönem varsa son dönemi, yoksa ilk elemanı seç
                 def_idx_end = 0
-                def_idx_start = min(2, len(available_realized_periods)-1)
                 
                 p_end = col_p1.selectbox("Bitiş Dönemi", available_realized_periods, index=def_idx_end)
-                # Başlangıç, bitişten küçük veya eşit olmalı mantığı
+                
+                # Başlangıç, Bitişten küçük veya eşit olmalı (Eski tarih -> Yeni Tarih)
+                # Liste descending (2025, 2024...) olduğu için Index(Start) >= Index(End) olmalı
                 remain_periods = [p for p in available_realized_periods if p <= p_end]
-                p_start = col_p2.selectbox("Başlangıç Dönemi", remain_periods, index=min(2, len(remain_periods)-1))
+                
+                # Varsayılan başlangıç olarak son 3 dönemi (veya listenin sonunu) seçelim
+                def_idx_start = min(2, len(remain_periods)-1)
+                p_start = col_p2.selectbox("Başlangıç Dönemi", remain_periods, index=def_idx_start)
             
-            # Seçilen aralıktaki gerçekleşen verileri filtrele
             mask_real = (realized_df['Donem'] >= p_start) & (realized_df['Donem'] <= p_end)
             target_real_df = realized_df[mask_real].copy()
             
             if not target_real_df.empty:
-                # Tahminleri Gerçekleşenlerle Birleştir
                 perf_df = pd.merge(df_latest, target_real_df, left_on="donem", right_on="Donem", how="inner")
                 
-                # Hata Hesaplamaları (Mutlak Sapma)
                 perf_df['err_ppk'] = (perf_df['tahmin_ppk_faiz'] - perf_df['PPK Faizi']).abs()
                 perf_df['err_enf_ay'] = (perf_df['tahmin_aylik_enf'] - perf_df['Aylık TÜFE']).abs()
                 
-                # Yıllık Enflasyon için kolon kontrolü
                 if 'tahmin_yillik_enf' in perf_df.columns:
                      perf_df['val_enf_yil'] = perf_df['tahmin_yillik_enf'].fillna(perf_df['tahmin_yilsonu_enf'])
                 else:
@@ -791,19 +804,14 @@ elif page == "Dashboard":
                      
                 perf_df['err_enf_yil'] = (perf_df['val_enf_yil'] - perf_df['Yıllık TÜFE']).abs()
 
-                # --- KARTLARI OLUŞTUR ---
                 c_best1, c_best2, c_best3 = st.columns(3)
 
                 def show_champion_card(col_obj, title, err_col, unit, icon, pred_col, act_col):
-                    # İlgili hatası boş olmayanları al
                     valid_df = perf_df.dropna(subset=[err_col])
                     if valid_df.empty:
                         col_obj.warning(f"{title}\nVeri yok.")
                         return
 
-                    # İSTATİSTİK HESAPLAMA:
-                    # Grupla: İsim
-                    # Hesapla: Hata Ortalaması, Tahmin Ortalaması, Gerçekleşen Ortalaması, Sayı
                     leaderboard = valid_df.groupby('gorunen_isim').agg({
                         err_col: 'mean',
                         pred_col: 'mean',
@@ -811,19 +819,15 @@ elif page == "Dashboard":
                         'donem': 'count'
                     }).reset_index()
                     
-                    # Sıralama: En düşük hatadan en yükseğe
                     leaderboard = leaderboard.sort_values(by=[err_col, 'donem'], ascending=[True, False])
-                    
                     winner = leaderboard.iloc[0]
                     
-                    # Gösterim (Tek dönemse direkt değer, çoklu dönemse ortalama yazar)
                     col_obj.success(f"{icon} **{title}**\n\n"
                                     f"🥇 **{winner['gorunen_isim']}**\n\n"
                                     f"Ort. Tahmin: **%{winner[pred_col]:.2f}**\n"
                                     f"Ort. Gerçek: **%{winner[act_col]:.2f}**\n"
                                     f"Ort. Sapma: **{winner[err_col]:.2f} {unit}**")
 
-                # Kartları Çağır (Tahmin Kolonu ve Gerçekleşen Kolonu argümanlarını ekledik)
                 show_champion_card(c_best1, "PPK Faizi", "err_ppk", "Puan", "🏦", "tahmin_ppk_faiz", "PPK Faizi")
                 show_champion_card(c_best2, "Aylık Enflasyon", "err_enf_ay", "Puan", "📉", "tahmin_aylik_enf", "Aylık TÜFE")
                 show_champion_card(c_best3, "Yıllık Enflasyon", "err_enf_yil", "Puan", "🏷️", "val_enf_yil", "Yıllık TÜFE")
@@ -836,7 +840,6 @@ elif page == "Dashboard":
             
         st.markdown("---")
 
-        # --- MEVCUT FİLTRELER VE GRAFİKLER ---
         with st.sidebar:
             st.markdown("### 🔍 Dashboard Filtreleri")
             x_axis_mode = st.radio("Grafik Görünümü (X Ekseni)", ["📅 Hedef Dönem (Vade)", "⏳ Tahmin Tarihi (Revizyon)"])
@@ -846,7 +849,6 @@ elif page == "Dashboard":
             st.markdown("---")
             cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
             
-            # Filtre mantığı
             df_filt_base = df_latest[df_latest['kategori'].isin(cat_filter)]
             avail_src = sorted(df_filt_base['anket_kaynagi'].astype(str).unique())
             src_filter = st.multiselect("Kaynak", avail_src, default=avail_src)
@@ -882,7 +884,6 @@ elif page == "Dashboard":
                 fig = px.line(chart_data, x=x_axis_col, y=y, color="gorunen_isim" if not is_single_user else "donem", markers=True, title=tit, hover_data=["hover_text"])
                 if tick_format: fig.update_xaxes(tickformat=tick_format)
                 
-                # Gerçekleşen Veriyi Ekleme Mantığı
                 if x_axis_mode.startswith("📅") and real_key and realized_dict:
                     real_df_data = []
                     for d, vals in realized_dict.items():
@@ -891,7 +892,6 @@ elif page == "Dashboard":
                     
                     if real_df_data:
                         real_df_p = pd.DataFrame(real_df_data).sort_values('donem')
-                        # Grafikteki tarih aralığına göre kes
                         min_d = chart_data['donem'].min()
                         max_d = chart_data['donem'].max()
                         real_df_p = real_df_p[(real_df_p['donem'] >= min_d) & (real_df_p['donem'] <= max_d)]
@@ -903,7 +903,6 @@ elif page == "Dashboard":
                                 line=dict(color='black', width=4, dash='dot'), marker=dict(size=8, color='black', symbol='x')
                             ))
 
-                # Hata Çubukları (Min-Max Aralığı)
                 dfr = chart_data.dropna(subset=[min_c, max_c])
                 if not dfr.empty:
                     grp = "donem" if is_single_user else "gorunen_isim"
@@ -937,7 +936,6 @@ elif page == "Dashboard":
                 fig.add_vline(x=mv, line_width=3, line_color="red")
                 fig.add_annotation(x=mv, y=-0.1, text=f"MEDYAN %{mv:.2f}", showarrow=False, font=dict(color="red", size=14, weight="bold"), yref="paper")
                 
-                # Gerçekleşen veri varsa onu da dikey çizgi olarak ekle
                 if realized_dict and tp in realized_dict:
                      real_key_map = {"PPK": "ppk", "Ay Enf": "enf_ay", "YS Enf": "enf_yil"}
                      rv = realized_dict[tp].get(real_key_map[sm])
@@ -1049,11 +1047,13 @@ elif page == "📈 Piyasa Verileri (EVDS)":
             with c2: st.download_button("📥 Excel İndir", to_excel(df_evds), "Piyasa_Verileri.xlsx", type="primary")
             
             st.markdown("---")
-            c_g1, c_g2 = st.columns(2)
+            c_g1, c_g2, c_g3 = st.columns(3)
             if 'PPK Faizi' in df_evds.columns:
                 c_g1.plotly_chart(px.line(df_evds, x='Donem', y='PPK Faizi', title="Politika Faizi (BIS Kaynaklı)", markers=True), use_container_width=True)
             if 'Aylık TÜFE' in df_evds.columns:
                 c_g2.plotly_chart(px.line(df_evds, x='Donem', y='Aylık TÜFE', title="Aylık Enflasyon (EVDS)", markers=True), use_container_width=True)
+            if 'Yıllık TÜFE' in df_evds.columns:
+                c_g3.plotly_chart(px.line(df_evds, x='Donem', y='Yıllık TÜFE', title="Yıllık Enflasyon (EVDS)", markers=True), use_container_width=True)
 
         elif err:
             st.warning(f"Hata oluştu: {err}")
@@ -1174,97 +1174,197 @@ elif page == "📄 Rapor Oluştur":
 # ========================================================
 elif page == "📥 Toplu Veri Yükleme (Excel)":
     st.header("📥 Toplu Veri Yükleme")
-    st.info("Bu alandan çok sayıda veriyi Excel formatında yükleyebilirsiniz. Lütfen önce şablonu indirin.")
+    st.info("Bu alandan çok sayıda veriyi Excel formatında yükleyebilirsiniz. Sistem mevcut kayıtları kontrol eder ve onayınızı ister.")
 
-    # Şablon Oluşturma
+    # --- 1. ŞABLON OLUŞTURMA ---
     def generate_excel_template():
+        # Şablona Gelecek Dönem sütunlarını ekledik
         df_temp = pd.DataFrame(columns=[
             "Katılımcı Adı", "Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)", 
-            "Kategori (Bireysel/Kurumsal)", "Link", "PPK Tahmin", 
-            "Yıl Sonu Faiz", "Aylık Enf", "Yıllık Enf", 
-            "Yıl Sonu Enf", "N Sayısı"
+            "Kategori (Bireysel/Kurumsal)", "Link", 
+            "PPK Tahmin", "Yıl Sonu Faiz", 
+            "Aylık Enf", "Yıllık Enf", "Yıl Sonu Enf", "N Sayısı",
+            "Gelecek Hedef Dönem (YYYY-AA)", "Gelecek Tahmin (Enf)", "Gelecek Tahmin (PPK)"
         ])
         # Örnek Satır
-        df_temp.loc[0] = ["Örnek Banka", "2025-01", "2024-12-25", "Kurumsal", "", 45.0, 40.0, 3.5, 45.5, 42.0, 15]
+        df_temp.loc[0] = [
+            "Örnek Banka", "2025-10", "2025-10-15", "Kurumsal", "", 
+            45.0, 40.0, 
+            1.5, 30.0, 32.0, 15,
+            "2026-12", 25.0, 35.0 
+        ]
         
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_temp.to_excel(writer, index=False, sheet_name='Veri_Girisi')
+            # Sütun genişliklerini ayarla (Estetik)
+            worksheet = writer.sheets['Veri_Girisi']
+            for i, col in enumerate(df_temp.columns):
+                worksheet.set_column(i, i, 20)
+                
         return output.getvalue()
 
-    col_d, col_u = st.columns([1, 2])
-    with col_d:
+    c_dl, c_up = st.columns([1, 2])
+    with c_dl:
         st.subheader("1. Şablon İndir")
         st.download_button(
             label="📥 Excel Şablonunu İndir",
             data=generate_excel_template(),
-            file_name="Veri_Yukleme_Sablonu.xlsx",
+            file_name="Veri_Yukleme_Sablonu_v2.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary"
         )
 
-    with col_u:
-        st.subheader("2. Dosya Yükle")
+    with c_up:
+        st.subheader("2. Dosya Yükle ve Kontrol Et")
         uploaded_file = st.file_uploader("Excel Dosyası Seç (.xlsx)", type=["xlsx"])
 
+    # --- 2. DOSYA İŞLEME VE KONTROL ---
     if uploaded_file:
         try:
             df_upload = pd.read_excel(uploaded_file)
-            st.success("Dosya okundu. Önizleme:")
-            st.dataframe(df_upload.head(), use_container_width=True)
             
-            if st.button("🚀 Verileri Veritabanına Yaz"):
-                progress_bar = st.progress(0)
-                success_count = 0
-                error_count = 0
-                
-                total_rows = len(df_upload)
-                
-                for index, row in df_upload.iterrows():
-                    try:
-                        # Veri Hazırlığı
-                        user = str(row["Katılımcı Adı"]).strip()
-                        period = str(row["Dönem (YYYY-AA)"]).strip()
-                        cat = str(row["Kategori (Bireysel/Kurumsal)"]).strip()
-                        
-                        # Tarih İşleme
-                        raw_date = row["Tarih (YYYY-AA-GG)"]
-                        if isinstance(raw_date, pd.Timestamp):
-                            forecast_date = raw_date.strftime("%Y-%m-%d")
-                        else:
-                            forecast_date = str(raw_date).split()[0] # Saat kısmını at
-                            
-                        link = str(row["Link"]) if pd.notnull(row["Link"]) else None
-                        
-                        def clean_val(val):
-                            try:
-                                v = float(val)
-                                return v if pd.notnull(v) else None
-                            except: return None
+            # Gerekli kolon kontrolü
+            required_cols = ["Katılımcı Adı", "Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)"]
+            if not all(col in df_upload.columns for col in required_cols):
+                st.error("Excel formatı hatalı! Lütfen güncel şablonu indirip tekrar deneyin.")
+                st.stop()
 
-                        data_dict = {
-                            "tahmin_ppk_faiz": clean_val(row["PPK Tahmin"]),
-                            "tahmin_yilsonu_faiz": clean_val(row["Yıl Sonu Faiz"]),
-                            "tahmin_aylik_enf": clean_val(row["Aylık Enf"]),
-                            "tahmin_yillik_enf": clean_val(row["Yıllık Enf"]),
-                            "tahmin_yilsonu_enf": clean_val(row["Yıl Sonu Enf"]),
-                            "katilimci_sayisi": int(clean_val(row["N Sayısı"]) or 0)
-                        }
-                        
-                        # Kaydet
-                        upsert_tahmin(user, period, cat, forecast_date, link, data_dict)
-                        success_count += 1
-                        
-                    except Exception as e:
-                        error_count += 1
-                        st.error(f"Satır {index+1} hatası: {e}")
+            st.write("📋 **Yüklenecek Veri Önizlemesi:**")
+            st.dataframe(df_upload.head(3), use_container_width=True)
+            
+            # --- ÇAKIŞMA KONTROLÜ (CONFLICT CHECK) ---
+            if 'check_done' not in st.session_state: st.session_state['check_done'] = False
+            
+            # Kontrol Butonu
+            if st.button("🔍 Veritabanı ile Karşılaştır"):
+                with st.spinner("Mevcut kayıtlar kontrol ediliyor..."):
+                    # Veritabanındaki tüm (User, Donem) ikililerini çekelim (Hızlı kontrol için)
+                    res = supabase.table(TABLE_TAHMIN).select("kullanici_adi, donem").execute()
+                    existing_set = set()
+                    for r in res.data:
+                        existing_set.add((r['kullanici_adi'], r['donem']))
                     
-                    progress_bar.progress((index + 1) / total_rows)
+                    duplicates = []
+                    new_records = []
+                    
+                    for index, row in df_upload.iterrows():
+                        u_name = str(row["Katılımcı Adı"]).strip()
+                        u_period = str(row["Dönem (YYYY-AA)"]).strip()
+                        
+                        # Gelecek dönem varsa onu da kontrol et
+                        u_future_period = str(row.get("Gelecek Hedef Dönem (YYYY-AA)", "")).strip()
+                        
+                        # Ana kayıt kontrolü
+                        if (u_name, u_period) in existing_set:
+                            duplicates.append(f"{u_name} - {u_period}")
+                        else:
+                            new_records.append(f"{u_name} - {u_period}")
+                            
+                        # Gelecek kayıt kontrolü (Varsa)
+                        if u_future_period and u_future_period.lower() != "nan" and u_future_period != "":
+                             if (u_name, u_future_period) in existing_set:
+                                 duplicates.append(f"{u_name} - {u_future_period} (Gelecek Tahmin)")
+                             else:
+                                 new_records.append(f"{u_name} - {u_future_period} (Gelecek Tahmin)")
+
+                    st.session_state['duplicates'] = duplicates
+                    st.session_state['new_count'] = len(new_records)
+                    st.session_state['check_done'] = True
+
+            # --- ONAY VE KAYIT EKRANI ---
+            if st.session_state.get('check_done'):
+                dups = st.session_state['duplicates']
+                cnt_new = st.session_state['new_count']
+                cnt_dup = len(dups)
                 
-                st.toast(f"İşlem Tamamlandı! Başarılı: {success_count}, Hata: {error_count}", icon="✅")
-                time.sleep(1)
-                st.rerun()
+                st.markdown("---")
+                c1, c2 = st.columns(2)
                 
+                c1.info(f"🆕 **{cnt_new}** adet yeni kayıt oluşturulacak.")
+                
+                confirm_overwrite = True # Varsayılan True
+                
+                if cnt_dup > 0:
+                    c2.warning(f"⚠️ **{cnt_dup}** adet kayıt veritabanında ZATEN MEVCUT!")
+                    with st.expander("Çakışan Kayıtları Gör"):
+                        st.write(dups)
+                    
+                    # Onay Kutusu
+                    confirm_overwrite = st.checkbox("Mevcut kayıtların üzerine yazılmasını onaylıyorum ✅", value=False)
+                    if not confirm_overwrite:
+                        st.error("Devam etmek için yukarıdaki onay kutusunu işaretleyin.")
+                
+                # KAYDET BUTONU
+                if st.button("🚀 İşlemi Başlat", type="primary", disabled=(cnt_dup > 0 and not confirm_overwrite)):
+                    progress_bar = st.progress(0)
+                    success_count = 0
+                    
+                    total_rows = len(df_upload)
+                    
+                    for index, row in df_upload.iterrows():
+                        try:
+                            # 1. VERİ TEMİZLİĞİ
+                            user = str(row["Katılımcı Adı"]).strip()
+                            period = str(row["Dönem (YYYY-AA)"]).strip()
+                            cat = str(row["Kategori (Bireysel/Kurumsal)"]).strip()
+                            link = str(row["Link"]) if pd.notnull(row["Link"]) else None
+                            
+                            # Tarih Formatlama
+                            raw_date = row["Tarih (YYYY-AA-GG)"]
+                            if isinstance(raw_date, pd.Timestamp): forecast_date = raw_date.strftime("%Y-%m-%d")
+                            else: forecast_date = str(raw_date).split()[0]
+
+                            def cv(val): 
+                                try:
+                                    v = float(val)
+                                    return v if pd.notnull(v) else None
+                                except: return None
+
+                            # Ana Veri Sözlüğü
+                            data_main = {
+                                "tahmin_ppk_faiz": cv(row.get("PPK Tahmin")),
+                                "tahmin_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz")),
+                                "tahmin_aylik_enf": cv(row.get("Aylık Enf")),
+                                "tahmin_yillik_enf": cv(row.get("Yıllık Enf")),
+                                "tahmin_yilsonu_enf": cv(row.get("Yıl Sonu Enf")),
+                                "katilimci_sayisi": int(cv(row.get("N Sayısı")) or 0)
+                            }
+                            
+                            # 2. ANA KAYDI İŞLE
+                            upsert_tahmin(user, period, cat, forecast_date, link, data_main)
+                            success_count += 1
+                            
+                            # 3. GELECEK HEDEF DÖNEM VAR MI?
+                            fut_period = str(row.get("Gelecek Hedef Dönem (YYYY-AA)", "")).strip()
+                            if fut_period and fut_period.lower() != "nan" and fut_period != "":
+                                fut_enf = cv(row.get("Gelecek Tahmin (Enf)"))
+                                fut_ppk = cv(row.get("Gelecek Tahmin (PPK)"))
+                                
+                                if fut_enf or fut_ppk:
+                                    data_future = {"katilimci_sayisi": int(cv(row.get("N Sayısı")) or 0)}
+                                    
+                                    if fut_enf:
+                                        data_future["tahmin_yilsonu_enf"] = fut_enf
+                                        data_future["tahmin_yillik_enf"] = fut_enf
+                                    
+                                    if fut_ppk:
+                                        data_future["tahmin_ppk_faiz"] = fut_ppk
+                                        data_future["tahmin_yilsonu_faiz"] = fut_ppk
+                                    
+                                    upsert_tahmin(user, fut_period, cat, forecast_date, link, data_future)
+
+                        except Exception as e:
+                            st.error(f"Satır {index+1} Hatası: {e}")
+                        
+                        progress_bar.progress((index + 1) / total_rows)
+                    
+                    st.success(f"İşlem Tamamlandı! {success_count} satır işlendi.")
+                    time.sleep(2)
+                    del st.session_state['check_done']
+                    del st.session_state['duplicates']
+                    st.rerun()
+
         except Exception as e:
             st.error(f"Dosya okuma hatası: {e}")
 
@@ -1281,7 +1381,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             c1, c2, c3 = st.columns([2, 1, 1])
             with c1: user, cat, disp = get_participant_selection()
             
-            # Varsayılan dönem ayarı (Bir sonraki ayı yakalamaya çalışır)
             def_idx = tum_donemler.index("2025-01") if "2025-01" in tum_donemler else 0
             with c2: donem = st.selectbox("Dönem (Cari)", tum_donemler, index=def_idx)
             with c3: tarih = st.date_input("Giriş Tarihi", datetime.date.today())
@@ -1290,7 +1389,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             st.markdown("---")
             data = {}; kat_sayisi = 0
             
-            # --- 2. VERİ GİRİŞ ALANLARI (ANA) ---
             if page == "PPK Girişi":
                 c1, c2 = st.columns(2)
                 r1 = c1.text_input("Aralık (42-45)", key="r1"); v1 = c1.number_input("Medyan %", step=0.25)
@@ -1301,7 +1399,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                     mn2 = ec2.number_input("Min YS", step=0.25); mx2 = ec2.number_input("Max YS", step=0.25)
                     kat_sayisi = ec3.number_input("N", step=1)
                 
-                # Parse Range Input
                 md, mn, mx, ok = parse_range_input(r1, v1); 
                 if ok: v1, mn1, mx1 = md, mn, mx
                 md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
@@ -1321,7 +1418,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                     mn3 = ec3.number_input("Min YS", step=0.01); mx3 = ec3.number_input("Max YS", step=0.01)
                     kat_sayisi = st.number_input("N", step=1)
                 
-                # Parse Range Input
                 md1, mn1, mx1, ok1 = parse_range_input(r1, v1); 
                 if ok1: v1, mn1, mx1 = md1, mn1, mx1
                 md2, mn2, mx2, ok2 = parse_range_input(r2, v2)
@@ -1337,7 +1433,7 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
 
             data["katilimci_sayisi"] = int(kat_sayisi) if kat_sayisi > 0 else 0
 
-            # --- 3. EKSTRA: GELECEK YIL TAHMİNİ (ORTAK ALAN) ---
+            # --- 3. EKSTRA: GELECEK YIL TAHMİNİ ---
             extra_future_data = None
             future_donem = None
             
@@ -1346,8 +1442,6 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             st.caption("Örn: Rapor şu anki ayı (Ekim) ele alıyor ama 'Gelecek Yıl Sonu' için de bir tahmin içeriyor.")
             
             fe1, fe2 = st.columns(2)
-            
-            # Otomatik olarak bir sonraki yılın Aralığını seçmeye çalışalım
             try:
                 curr_year = int(donem.split('-')[0])
                 next_december = f"{curr_year + 1}-12"
@@ -1359,13 +1453,11 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
             if page == "PPK Girişi":
                 future_val = fe2.number_input("Gelecek Dönem Politika Faizi Beklentisi (%)", step=0.25, format="%.2f")
                 if future_val > 0:
-                    # PPK için ileri vadeli tahmin hem o ayın faizi hem de (muhtemelen yıl sonu ise) yıl sonu faizi olarak girilir.
                     extra_future_data = {
                         "tahmin_ppk_faiz": future_val,
                         "tahmin_yilsonu_faiz": future_val,
                         "katilimci_sayisi": int(kat_sayisi)
                     }
-            
             else: # Enflasyon
                 future_val = fe2.number_input("Gelecek Dönem Enflasyon Beklentisi (%)", step=0.01, format="%.2f")
                 if future_val > 0:
@@ -1375,13 +1467,10 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
                         "katilimci_sayisi": int(kat_sayisi)
                     }
 
-            # --- KAYDETME İŞLEMİ ---
             if st.form_submit_button("✅ Kaydet"):
                 if user:
-                    # 1. Ana Tahmini Kaydet
                     upsert_tahmin(user, donem, cat, tarih, link, data)
                     
-                    # 2. Varsa Gelecek Tahmini Kaydet
                     if extra_future_data and future_donem and future_val > 0:
                         upsert_tahmin(user, future_donem, cat, tarih, link, extra_future_data)
                         st.toast(f"Kaydedildi! (Ana Dönem: {donem} + İleri Dönem: {future_donem})", icon="🎉")
