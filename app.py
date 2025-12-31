@@ -737,7 +737,6 @@ elif page == "Dashboard":
                 plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", "ppk")
             with c2:
                 plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
-                
             c3, c4 = st.columns(2)
             with c3:
                 plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay")
@@ -848,6 +847,33 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
+# SAYFA: PIYASA VERILERI (EVDS & BIS - GÜNCELLENMİŞ)
+# ========================================================
+elif page == "📈 Piyasa Verileri (EVDS)":
+    st.header("📈 Gerçekleşen Piyasa Verileri (EVDS & BIS)")
+    st.info("Bu ekran TCMB EVDS (Enflasyon) ve BIS (Politika Faizi) kaynaklarından veri çeker.")
+    with st.sidebar:
+        st.markdown("### 📅 Tarih Aralığı")
+        sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
+        ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
+    
+    if EVDS_API_KEY:
+        with st.spinner("Veriler çekiliyor (EVDS & BIS)..."):
+            df_evds, err = fetch_market_data_adapter(EVDS_API_KEY, sd, ed)
+        if not df_evds.empty:
+            c1, c2 = st.columns([3, 1])
+            with c1: st.dataframe(df_evds, use_container_width=True, height=500)
+            with c2: st.download_button("📥 Excel İndir", to_excel(df_evds), "Piyasa_Verileri.xlsx", type="primary")
+            st.markdown("---")
+            c_g1, c_g2, c_g3 = st.columns(3)
+            if 'PPK Faizi' in df_evds.columns: c_g1.plotly_chart(px.line(df_evds, x='Donem', y='PPK Faizi', title="Politika Faizi (BIS)", markers=True), use_container_width=True)
+            if 'Aylık TÜFE' in df_evds.columns: c_g2.plotly_chart(px.line(df_evds, x='Donem', y='Aylık TÜFE', title="Aylık Enflasyon (EVDS)", markers=True), use_container_width=True)
+            if 'Yıllık TÜFE' in df_evds.columns: c_g3.plotly_chart(px.line(df_evds, x='Donem', y='Yıllık TÜFE', title="Yıllık Enflasyon (EVDS)", markers=True), use_container_width=True)
+        elif err: st.warning(f"Hata oluştu: {err}")
+        else: st.warning("Bu tarih aralığı için veri bulunamadı.")
+    else: st.error("Lütfen .streamlit/secrets.toml dosyasına EVDS_KEY ekleyiniz.")
+
+# ========================================================
 # SAYFA: TOPLU VERİ YÜKLEME (EXCEL)
 # ========================================================
 elif page == "📥 Toplu Veri Yükleme (Excel)":
@@ -878,6 +904,23 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
             required_cols = ["Katılımcı Adı", "Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)"]
             if not all(col in df_upload.columns for col in required_cols): st.error("Excel formatı hatalı! Lütfen güncel şablonu indirip tekrar deneyin."); st.stop()
             st.write("📋 **Yüklenecek Veri Önizlemesi:**"); st.dataframe(df_upload.head(3), use_container_width=True)
+            
+            # --- YENİ KATILIMCI MANTIĞI EKLENDİ ---
+            # Excel'deki katılımcıları al
+            excel_user_data = {} 
+            for _, row in df_upload.iterrows():
+                nm = normalize_name(str(row["Katılımcı Adı"]))
+                cat = str(row.get("Kategori (Bireysel/Kurumsal)", "Bireysel"))
+                excel_user_data[nm] = cat
+                
+            # Veritabanındaki katılımcıları al
+            res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad").execute()
+            db_users = set([r['ad_soyad'] for r in res_k.data])
+            
+            users_to_add = []
+            for nm, cat in excel_user_data.items():
+                if nm not in db_users: users_to_add.append({"ad_soyad": nm, "kategori": cat})
+            
             if 'check_done' not in st.session_state: st.session_state['check_done'] = False
             
             if st.button("🔍 Veritabanı ile Karşılaştır"):
@@ -898,8 +941,16 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
 
             if st.session_state.get('check_done'):
                 dups = st.session_state['duplicates']; cnt_new = st.session_state['new_count']; cnt_dup = len(dups)
+                
+                # Yeni Katılımcı Bilgisi
+                if users_to_add:
+                    st.info(f"🆕 **{len(users_to_add)}** Yeni Katılımcı tespit edildi. İşlem sırasında otomatik eklenecekler.")
+                    with st.expander("Yeni Eklenecek Katılımcılar"): st.write([u['ad_soyad'] for u in users_to_add])
+                else:
+                    st.success("✅ Tüm katılımcılar sistemde kayıtlı.")
+
                 st.markdown("---"); c1, c2 = st.columns(2)
-                c1.info(f"🆕 **{cnt_new}** adet yeni kayıt oluşturulacak.")
+                c1.info(f"🆕 **{cnt_new}** adet yeni tahmin kaydı oluşturulacak.")
                 confirm_overwrite = True 
                 if cnt_dup > 0:
                     c2.warning(f"⚠️ **{cnt_dup}** adet kayıt veritabanında ZATEN MEVCUT!")
@@ -909,6 +960,14 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                 
                 if st.button("🚀 İşlemi Başlat", type="primary", disabled=(cnt_dup > 0 and not confirm_overwrite)):
                     progress_bar = st.progress(0); success_count = 0; total_rows = len(df_upload)
+                    
+                    # 1. Önce Yeni Katılımcıları Ekle
+                    if users_to_add:
+                        for new_u in users_to_add:
+                            try: supabase.table(TABLE_KATILIMCI).insert(new_u).execute()
+                            except: pass
+                    
+                    # 2. Tahminleri Ekle
                     for index, row in df_upload.iterrows():
                         try:
                             user = str(row["Katılımcı Adı"]).strip(); period = str(row["Dönem (YYYY-AA)"]).strip(); cat = str(row["Kategori (Bireysel/Kurumsal)"]).strip()
