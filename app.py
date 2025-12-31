@@ -54,14 +54,14 @@ except ImportError:
     st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter requests fpdf plotly pandas supabase openpyxl")
     st.stop()
 
-# --- BAĞLANTI VE SECRETS ---
+# --- BAĞLANTI VE AYARLAR ---
 try:
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     SITE_SIFRESI = st.secrets["APP_PASSWORD"]
     EVDS_API_KEY = st.secrets.get("EVDS_KEY", None)
     
-    # E-posta Ayarları (Opsiyonel ama silme için gerekli)
+    # E-posta Ayarları
     SMTP_EMAIL = st.secrets.get("SMTP_EMAIL", None)
     SMTP_PASSWORD = st.secrets.get("SMTP_PASSWORD", None)
     
@@ -73,7 +73,7 @@ except Exception as e:
 TABLE_TAHMIN = "tahminler4"
 TABLE_KATILIMCI = "katilimcilar"
 EVDS_BASE = "https://evds2.tcmb.gov.tr/service/evds"
-EVDS_TUFE_SERIES = "TP.FG.J0"  # TÜFE Serisi
+EVDS_TUFE_SERIES = "TP.FG.J0" 
 
 # --- YARDIMCI FONKSİYONLAR ---
 
@@ -164,22 +164,32 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
+# --- E-POSTA GÖNDERİM FONKSİYONU ---
 def send_verification_email(code):
     if not SMTP_EMAIL or not SMTP_PASSWORD:
-        return False, "SMTP ayarları (SMTP_EMAIL, SMTP_PASSWORD) secrets.toml dosyasında eksik."
+        return False, "SMTP Ayarları eksik! Lütfen secrets.toml dosyasını kontrol edin."
     
     try:
-        msg = MIMEText(f"Finansal Tahmin Terminali Veri Silme Onay Kodunuz: {code}\n\nBu işlemi siz başlatmadıysanız lütfen dikkate almayınız.")
+        msg = MIMEText(f"""
+        Merhaba,
+        
+        Finansal Tahmin Terminali veritabanını TAMAMEN SİLMEK için bir talep oluşturuldu.
+        
+        Onay Kodunuz: {code}
+        
+        Eğer bu işlemi siz başlatmadıysanız, lütfen bu mesajı dikkate almayın.
+        """)
         msg['Subject'] = '🚨 VERİ SİLME ONAY KODU'
         msg['From'] = SMTP_EMAIL
-        msg['To'] = "s.idrisoglu@gmail.com"
+        msg['To'] = "s.idrisoglu@gmail.com" # Sabitlenen mail adresi
 
+        # Gmail SSL portu 465
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.sendmail(SMTP_EMAIL, "s.idrisoglu@gmail.com", msg.as_string())
         return True, "Kod gönderildi."
     except Exception as e:
-        return False, str(e)
+        return False, f"Hata: {str(e)}"
 
 # =========================================================
 # VERİ ÇEKME MOTORU
@@ -406,18 +416,15 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
     res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
     df_t = pd.DataFrame(res_t.data)
-    
     if not df_t.empty:
         df_t = clean_and_sort_data(df_t)
         res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "kategori", "anket_kaynagi").execute()
         df_k = pd.DataFrame(res_k.data)
-        
         if not df_k.empty:
             df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
             df_full['kategori'] = df_full['kategori_y'].fillna('Bireysel')
             df_full['anket_kaynagi'] = df_full['anket_kaynagi'].fillna('-')
             df_full['tahmin_tarihi'] = pd.to_datetime(df_full['tahmin_tarihi'])
-
             with st.container():
                 c1, c2, c3, c4, c5 = st.columns(5)
                 sel_cat = c1.selectbox("Kategori", ["Tümü"] + list(df_full['kategori'].unique()))
@@ -425,22 +432,19 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                 sel_user = c3.selectbox("Katılımcı", ["Tümü"] + sorted(list(df_full['kullanici_adi'].unique())))
                 sort_option = c4.selectbox("Sıralama", ["Tarih (Yeniden Eskiye)", "Tarih (Eskiden Yeniye)", "Son Eklenen (ID)"])
                 admin_mode = c5.toggle("🛠️ Yönetici Modu")
-
             df_f = df_full.copy()
             if sel_cat != "Tümü": df_f = df_f[df_f['kategori'] == sel_cat]
             if sel_period != "Tümü": df_f = df_f[df_f['donem'] == sel_period]
             if sel_user != "Tümü": df_f = df_f[df_f['kullanici_adi'] == sel_user]
-            
             if sort_option == "Tarih (Yeniden Eskiye)": df_f = df_f.sort_values(by="tahmin_tarihi", ascending=False)
             elif sort_option == "Tarih (Eskiden Yeniye)": df_f = df_f.sort_values(by="tahmin_tarihi", ascending=True)
             else: df_f = df_f.sort_values(by="id", ascending=False)
-            
             if not admin_mode:
                 st.markdown("---")
                 cols = ["tahmin_tarihi", "donem", "kullanici_adi", "kategori", "anket_kaynagi", "kaynak_link", "katilimci_sayisi", "tahmin_ppk_faiz", "tahmin_yilsonu_faiz", "tahmin_aylik_enf", "tahmin_yillik_enf", "tahmin_yilsonu_enf"]
                 final_cols = [c for c in cols if c in df_f.columns]
                 col_cfg = {"kaynak_link": st.column_config.LinkColumn("Link", display_text="🔗"), "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"), **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c}}
-                st.dataframe(df_f[final_cols], column_config=col_cfg, use_container_width=True, height=600)
+                st.dataframe(df_f[final_cols].sort_values(by="tahmin_tarihi", ascending=False), column_config=col_cfg, use_container_width=True, height=600)
                 if not df_f.empty:
                     df_ex = df_f.copy(); df_ex['tahmin_tarihi'] = df_ex['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
                     st.download_button("📥 Excel İndir", to_excel(df_ex), f"Veri_{sel_user}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
@@ -628,12 +632,16 @@ elif page == "Dashboard":
                 st.plotly_chart(fig, use_container_width=True)
             
             c1, c2 = st.columns(2)
-            with c1: plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", "ppk")
-            with c2: plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
+            with c1:
+                plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", "ppk")
+            with c2:
+                plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
                 
             c3, c4 = st.columns(2)
-            with c3: plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay")
-            with c4: plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf (Veya Yıllık)", "enf_yil")
+            with c3:
+                plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay")
+            with c4:
+                plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf (Veya Yıllık)", "enf_yil")
 
         with tabs[1]:
             pers = sorted(list(target_df['donem'].unique()), reverse=True)
@@ -739,125 +747,6 @@ elif page == "🔥 Isı Haritası":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: PIYASA VERILERI (EVDS & BIS - GÜNCELLENMİŞ)
-# ========================================================
-elif page == "📈 Piyasa Verileri (EVDS)":
-    st.header("📈 Gerçekleşen Piyasa Verileri (EVDS & BIS)")
-    st.info("Bu ekran TCMB EVDS (Enflasyon) ve BIS (Politika Faizi) kaynaklarından veri çeker.")
-    with st.sidebar:
-        st.markdown("### 📅 Tarih Aralığı")
-        sd = st.date_input("Başlangıç", datetime.date(2024, 1, 1))
-        ed = st.date_input("Bitiş", datetime.date(2025, 12, 31))
-    
-    if EVDS_API_KEY:
-        with st.spinner("Veriler çekiliyor (EVDS & BIS)..."):
-            df_evds, err = fetch_market_data_adapter(EVDS_API_KEY, sd, ed)
-        if not df_evds.empty:
-            c1, c2 = st.columns([3, 1])
-            with c1: st.dataframe(df_evds, use_container_width=True, height=500)
-            with c2: st.download_button("📥 Excel İndir", to_excel(df_evds), "Piyasa_Verileri.xlsx", type="primary")
-            st.markdown("---")
-            c_g1, c_g2, c_g3 = st.columns(3)
-            if 'PPK Faizi' in df_evds.columns: c_g1.plotly_chart(px.line(df_evds, x='Donem', y='PPK Faizi', title="Politika Faizi (BIS)", markers=True), use_container_width=True)
-            if 'Aylık TÜFE' in df_evds.columns: c_g2.plotly_chart(px.line(df_evds, x='Donem', y='Aylık TÜFE', title="Aylık Enflasyon (EVDS)", markers=True), use_container_width=True)
-            if 'Yıllık TÜFE' in df_evds.columns: c_g3.plotly_chart(px.line(df_evds, x='Donem', y='Yıllık TÜFE', title="Yıllık Enflasyon (EVDS)", markers=True), use_container_width=True)
-        elif err: st.warning(f"Hata oluştu: {err}")
-        else: st.warning("Bu tarih aralığı için veri bulunamadı.")
-    else: st.error("Lütfen .streamlit/secrets.toml dosyasına EVDS_KEY ekleyiniz.")
-
-# ========================================================
-# SAYFA: RAPOR OLUŞTUR
-# ========================================================
-elif page == "📄 Rapor Oluştur":
-    st.header("📄 Profesyonel Rapor Oluşturucu")
-    res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
-    df_t = pd.DataFrame(res_t.data)
-    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
-    df_k = pd.DataFrame(res_k.data)
-
-    if not df_t.empty and not df_k.empty:
-        df_t = clean_and_sort_data(df_t)
-        df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
-        df_t = df_t.sort_values(by='tahmin_tarihi')
-        
-        df_latest = df_t.drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
-        df = pd.merge(df_latest, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
-        
-        df['gorunen_isim'] = df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
-        df['kategori'] = df['kategori'].fillna('Bireysel')
-        df['anket_kaynagi'] = df['anket_kaynagi'].fillna('-')
-        df['yil'] = df['donem'].apply(lambda x: x.split('-')[0])
-
-        c_left, c_right = st.columns([1, 2])
-        with c_left:
-            st.subheader("1. Rapor Bilgileri")
-            rep_title = st.text_input("Rapor Başlığı", "Piyasa Beklentileri Raporu")
-            rep_unit = st.text_input("Birim İsmi", "Reel Sektör İlişkileri")
-            rep_date = st.date_input("Rapor Tarihi", datetime.date.today())
-            rep_body = st.text_area("Analiz Metni", height=150, placeholder="Analiz metni...")
-            st.markdown("---"); st.subheader("2. İçerik Seçimi")
-            inc_ppk_chart = st.checkbox("Grafik: PPK Beklentileri", value=True)
-            inc_enf_chart = st.checkbox("Grafik: Enflasyon Beklentileri", value=True)
-            inc_box_chart = st.checkbox("Grafik: Dağılım (Box Plot)", value=False)
-            inc_summary = st.checkbox("Tablo: Özet İstatistikler", value=True)
-            inc_detail = st.checkbox("Tablo: Detaylı Veri", value=False)
-            st.markdown("---"); st.subheader("3. Veri Filtreleri")
-            cat_f = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Kurumsal"])
-            src_f = st.multiselect("Kaynak", sorted(df['anket_kaynagi'].unique()), default=sorted(df['anket_kaynagi'].unique()))
-            all_periods_rep = sorted(df['donem'].unique(), reverse=True)
-            per_f = st.multiselect("Dönem (Period)", all_periods_rep, default=all_periods_rep[:6] if len(all_periods_rep)>0 else [])
-
-        df_rep = df[df['kategori'].isin(cat_f) & df['anket_kaynagi'].isin(src_f) & df['donem'].isin(per_f)]
-        report_blocks = []
-        with c_right:
-            st.subheader("Önizleme")
-            if df_rep.empty: st.warning("Seçilen filtrelerde veri yok.")
-            else:
-                if inc_ppk_chart:
-                    fig1 = px.line(df_rep.sort_values("donem_date"), x="donem", y="tahmin_ppk_faiz", color="gorunen_isim", markers=True, title="PPK Faiz Beklentileri")
-                    st.plotly_chart(fig1, use_container_width=True)
-                    report_blocks.append({'type': 'chart', 'title': 'PPK Faiz Beklentileri', 'fig': fig1})
-                if inc_enf_chart:
-                    fig2 = px.line(df_rep.sort_values("donem_date"), x="donem", y="tahmin_yilsonu_enf", color="gorunen_isim", markers=True, title="Yıl Sonu Enflasyon Beklentileri")
-                    st.plotly_chart(fig2, use_container_width=True)
-                    report_blocks.append({'type': 'chart', 'title': 'Yıl Sonu Enflasyon Beklentileri', 'fig': fig2})
-                if inc_box_chart:
-                    fig3 = px.box(df_rep.sort_values("donem_date"), x="donem", y="tahmin_yilsonu_enf", color="donem", title="Enflasyon Dağılımı")
-                    st.plotly_chart(fig3, use_container_width=True)
-                    report_blocks.append({'type': 'chart', 'title': 'Enflasyon Beklenti Dağılımı', 'fig': fig3})
-                if inc_summary:
-                    agg_df = df_rep.groupby('donem').agg(Min_PPK=('tahmin_ppk_faiz', 'min'), Max_PPK=('tahmin_ppk_faiz', 'max'), Med_PPK=('tahmin_ppk_faiz', 'median'), Med_Enf=('tahmin_yilsonu_enf', 'median'), Katilimci=('kullanici_adi', 'count')).reset_index().sort_values('donem', ascending=False)
-                    for c in ['Min_PPK', 'Max_PPK', 'Med_PPK', 'Med_Enf']: agg_df[c] = agg_df[c].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "-")
-                    st.write("Özet Tablo:"); st.dataframe(agg_df, use_container_width=True)
-                    report_blocks.append({'type': 'table', 'title': 'Dönemsel Özet İstatistikler', 'df': agg_df})
-                if inc_detail:
-                    detail_df = df_rep[['donem', 'gorunen_isim', 'tahmin_ppk_faiz', 'tahmin_yilsonu_enf']].sort_values(['donem', 'gorunen_isim'], ascending=[False, True])
-                    detail_df.columns = ['Dönem', 'Kurum', 'PPK', 'Enflasyon (YS)']
-                    st.write("Detaylı Veri:"); st.dataframe(detail_df, use_container_width=True)
-                    report_blocks.append({'type': 'table', 'title': 'Katılımcı Bazlı Detaylar', 'df': detail_df})
-
-        st.markdown("---")
-        c_btn1, c_btn2, c_btn3 = st.columns(3)
-        if c_btn1.button("📄 PDF İndir (Siyah/Beyaz/Güvenli)"):
-            if not df_rep.empty and report_blocks:
-                r_data = {'title': rep_title, 'unit': rep_unit, 'date': rep_date.strftime('%d.%m.%Y'), 'body': rep_body, 'content_blocks': report_blocks}
-                with st.spinner("PDF hazırlanıyor..."): pdf_bytes = create_custom_pdf_report(r_data)
-                st.download_button(label="⬇️ İndir", data=pdf_bytes, file_name="Rapor.pdf", mime="application/pdf")
-            else: st.error("İçerik yok.")
-        if c_btn2.button("📝 Word İndir (Renkli & Logolu)"):
-            if not df_rep.empty and report_blocks:
-                r_data = {'title': rep_title, 'unit': rep_unit, 'date': rep_date.strftime('%d.%m.%Y'), 'body': rep_body, 'content_blocks': report_blocks}
-                with st.spinner("Word dosyası hazırlanıyor..."): word_bytes = create_word_report(r_data)
-                st.download_button(label="⬇️ İndir", data=word_bytes, file_name="Rapor.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            else: st.error("İçerik yok.")
-        if c_btn3.button("📊 Excel Dashboard İndir (Editlenebilir Grafik)"):
-            if not df_rep.empty:
-                with st.spinner("Excel grafikleri oluşturuluyor..."): excel_bytes = create_excel_dashboard(df_rep)
-                st.download_button(label="⬇️ İndir", data=excel_bytes, file_name="Dashboard.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            else: st.error("İçerik yok.")
-    else: st.info("Veri yok.")
-
-# ========================================================
 # SAYFA: TOPLU VERİ YÜKLEME (EXCEL)
 # ========================================================
 elif page == "📥 Toplu Veri Yükleme (Excel)":
@@ -865,19 +754,40 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
     st.info("Bu alandan çok sayıda veriyi Excel formatında yükleyebilirsiniz. Sistem mevcut kayıtları kontrol eder ve onayınızı ister.")
 
     def generate_excel_template():
-        df_temp = pd.DataFrame(columns=["Katılımcı Adı", "Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)", "Kategori (Bireysel/Kurumsal)", "Link", "PPK Tahmin", "Yıl Sonu Faiz", "Aylık Enf", "Yıllık Enf", "Yıl Sonu Enf", "N Sayısı", "Gelecek Hedef Dönem (YYYY-AA)", "Gelecek Tahmin (Enf)", "Gelecek Tahmin (PPK)"])
-        df_temp.loc[0] = ["Örnek Banka", "2025-10", "2025-10-15", "Kurumsal", "", 45.0, 40.0, 1.5, 30.0, 32.0, 15, "2026-12", 25.0, 35.0]
+        # Güncellenmiş Şablon (Medyan, Min, Max alanları dahil)
+        cols = [
+            "Katılımcı Adı", "Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)", "Kategori", "Link", 
+            "PPK Medyan", "PPK Min", "PPK Max", 
+            "Yıl Sonu Faiz Medyan", "Yıl Sonu Faiz Min", "Yıl Sonu Faiz Max",
+            "Aylık Enf Medyan", "Aylık Enf Min", "Aylık Enf Max",
+            "Yıllık Enf Medyan", "Yıllık Enf Min", "Yıllık Enf Max",
+            "Yıl Sonu Enf Medyan", "Yıl Sonu Enf Min", "Yıl Sonu Enf Max",
+            "N Sayısı",
+            "Gelecek Hedef Dönem", "Gelecek Tahmin (Enf)", "Gelecek Tahmin (PPK)"
+        ]
+        df_temp = pd.DataFrame(columns=cols)
+        # Örnek Satır
+        df_temp.loc[0] = [
+            "Örnek Banka", "2025-10", "2025-10-15", "Kurumsal", "", 
+            45.0, 42.0, 48.0, 
+            40.0, 38.0, 42.0,
+            1.5, 1.2, 1.8,
+            30.0, 28.0, 32.0,
+            35.0, 33.0, 37.0,
+            15,
+            "2026-12", 25.0, 35.0
+        ]
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_temp.to_excel(writer, index=False, sheet_name='Veri_Girisi')
             worksheet = writer.sheets['Veri_Girisi']
-            for i, col in enumerate(df_temp.columns): worksheet.set_column(i, i, 20)
+            for i, col in enumerate(cols): worksheet.set_column(i, i, 20)
         return output.getvalue()
 
     c_dl, c_up = st.columns([1, 2])
     with c_dl:
         st.subheader("1. Şablon İndir")
-        st.download_button(label="📥 Excel Şablonunu İndir", data=generate_excel_template(), file_name="Veri_Yukleme_Sablonu_v2.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+        st.download_button(label="📥 Excel Şablonunu İndir", data=generate_excel_template(), file_name="Veri_Yukleme_Sablonu_v3.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
     with c_up:
         st.subheader("2. Dosya Yükle ve Kontrol Et")
         uploaded_file = st.file_uploader("Excel Dosyası Seç (.xlsx)", type=["xlsx"])
@@ -892,7 +802,7 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
             excel_user_data = {} 
             for _, row in df_upload.iterrows():
                 nm = normalize_name(str(row["Katılımcı Adı"]))
-                cat = str(row.get("Kategori (Bireysel/Kurumsal)", "Bireysel"))
+                cat = str(row.get("Kategori", "Bireysel"))
                 excel_user_data[nm] = cat
             res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad").execute()
             db_users = set([r['ad_soyad'] for r in res_k.data])
@@ -910,7 +820,7 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                     duplicates = []; new_records = []
                     for index, row in df_upload.iterrows():
                         u_name = str(row["Katılımcı Adı"]).strip(); u_period = str(row["Dönem (YYYY-AA)"]).strip()
-                        u_future_period = str(row.get("Gelecek Hedef Dönem (YYYY-AA)", "")).strip()
+                        u_future_period = str(row.get("Gelecek Hedef Dönem", "")).strip()
                         if (u_name, u_period) in existing_set: duplicates.append(f"{u_name} - {u_period}")
                         else: new_records.append(f"{u_name} - {u_period}")
                         if u_future_period and u_future_period.lower() != "nan" and u_future_period != "":
@@ -942,7 +852,7 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                             except: pass
                     for index, row in df_upload.iterrows():
                         try:
-                            user = str(row["Katılımcı Adı"]).strip(); period = str(row["Dönem (YYYY-AA)"]).strip(); cat = str(row["Kategori (Bireysel/Kurumsal)"]).strip()
+                            user = str(row["Katılımcı Adı"]).strip(); period = str(row["Dönem (YYYY-AA)"]).strip(); cat = str(row.get("Kategori", "Bireysel")).strip()
                             link = str(row["Link"]) if pd.notnull(row["Link"]) else None
                             raw_date = row["Tarih (YYYY-AA-GG)"]
                             if isinstance(raw_date, pd.Timestamp): forecast_date = raw_date.strftime("%Y-%m-%d")
@@ -950,10 +860,29 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                             def cv(val): 
                                 try: v = float(val); return v if pd.notnull(v) else None
                                 except: return None
-                            data_main = {"tahmin_ppk_faiz": cv(row.get("PPK Tahmin")), "tahmin_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz")), "tahmin_aylik_enf": cv(row.get("Aylık Enf")), "tahmin_yillik_enf": cv(row.get("Yıllık Enf")), "tahmin_yilsonu_enf": cv(row.get("Yıl Sonu Enf")), "katilimci_sayisi": int(cv(row.get("N Sayısı")) or 0)}
+                            
+                            data_main = {
+                                "tahmin_ppk_faiz": cv(row.get("PPK Medyan")),
+                                "min_ppk_faiz": cv(row.get("PPK Min")),
+                                "max_ppk_faiz": cv(row.get("PPK Max")),
+                                "tahmin_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Medyan")),
+                                "min_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Min")),
+                                "max_yilsonu_faiz": cv(row.get("Yıl Sonu Faiz Max")),
+                                "tahmin_aylik_enf": cv(row.get("Aylık Enf Medyan")),
+                                "min_aylik_enf": cv(row.get("Aylık Enf Min")),
+                                "max_aylik_enf": cv(row.get("Aylık Enf Max")),
+                                "tahmin_yillik_enf": cv(row.get("Yıllık Enf Medyan")),
+                                "min_yillik_enf": cv(row.get("Yıllık Enf Min")),
+                                "max_yillik_enf": cv(row.get("Yıllık Enf Max")),
+                                "tahmin_yilsonu_enf": cv(row.get("Yıl Sonu Enf Medyan")),
+                                "min_yilsonu_enf": cv(row.get("Yıl Sonu Enf Min")),
+                                "max_yilsonu_enf": cv(row.get("Yıl Sonu Enf Max")),
+                                "katilimci_sayisi": int(cv(row.get("N Sayısı")) or 0)
+                            }
                             upsert_tahmin(user, period, cat, forecast_date, link, data_main)
                             success_count += 1
-                            fut_period = str(row.get("Gelecek Hedef Dönem (YYYY-AA)", "")).strip()
+                            
+                            fut_period = str(row.get("Gelecek Hedef Dönem", "")).strip()
                             if fut_period and fut_period.lower() != "nan" and fut_period != "":
                                 fut_enf = cv(row.get("Gelecek Tahmin (Enf)")); fut_ppk = cv(row.get("Gelecek Tahmin (PPK)"))
                                 if fut_enf or fut_ppk:
@@ -1056,12 +985,31 @@ elif page == "Katılımcı Yönetimi":
                 supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
                 st.toast(f"{ks} ve tüm verileri silindi.", icon="👋"); time.sleep(1); st.rerun()
 
-    # 3. Tehlike Bölgesi: Tüm Veritabanını Silme
+    # 3. Orphan Data Temizliği
+    st.markdown("---"); st.subheader("🛠️ Veritabanı Bakımı")
+    with st.expander("🧹 Yetim Verileri (Orphan Data) Temizle"):
+        st.info("Bu işlem, 'Katılımcılar' listesinde kaydı olmayan ancak 'Tahminler' tablosunda verisi kalmış (silinmiş kullanıcıların artığı) kayıtları tespit eder ve temizler.")
+        if st.button("Taramayı Başlat"):
+            with st.spinner("Veritabanı taranıyor..."):
+                valid_users = set(df_kat["ad_soyad"].unique()) if not df_kat.empty else set()
+                res_t = supabase.table(TABLE_TAHMIN).select("kullanici_adi").execute(); df_t_users = pd.DataFrame(res_t.data)
+                if not df_t_users.empty:
+                    existing_users = set(df_t_users["kullanici_adi"].unique())
+                    orphans = existing_users - valid_users
+                    if orphans:
+                        st.error(f"Tespit edilen yetim kullanıcı verileri: {len(orphans)} adet"); st.write(list(orphans))
+                        if st.button("🗑️ Hepsini Kalıcı Olarak Sil"):
+                            for orphan_user in orphans: supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", orphan_user).execute()
+                            st.success("Temizlik tamamlandı! Veritabanı tutarlı."); time.sleep(2); st.rerun()
+                    else: st.success("✅ Veritabanı temiz. Yetim veri bulunamadı.")
+                else: st.info("Tahmin tablosu boş.")
+    
+    # 4. TEHLİKE BÖLGESİ (E-POSTA ONAYLI SİLME)
     st.markdown("---")
     with st.expander("🚨 TEHLİKE BÖLGESİ: TÜM VERİLERİ SİL"):
         st.error("Bu işlem veritabanındaki TÜM tahmin verilerini ve katılımcıları kalıcı olarak siler.")
         
-        if 'delete_stage' not in st.session_state: st.session_state['delete_stage'] = 0 # 0: Başla, 1: Şifre OK, OTP Giriliyor
+        if 'delete_stage' not in st.session_state: st.session_state['delete_stage'] = 0 
         
         if st.session_state['delete_stage'] == 0:
             if st.button("🔥 Sıfırlama Talebi Oluştur"):
@@ -1074,10 +1022,8 @@ elif page == "Katılımcı Yönetimi":
             
             if st.button("Onay Kodu Gönder"):
                 if admin_pwd == SITE_SIFRESI:
-                    # OTP Oluştur ve Gönder
                     otp_code = str(random.randint(100000, 999999))
                     st.session_state['generated_otp'] = otp_code
-                    
                     success, msg = send_verification_email(otp_code)
                     if success:
                         st.success(f"Onay kodu s.idrisoglu@gmail.com adresine gönderildi.")
@@ -1087,7 +1033,6 @@ elif page == "Katılımcı Yönetimi":
                         st.error(f"E-posta gönderilemedi: {msg}")
                 else:
                     st.error("Hatalı Şifre!")
-            
             if st.button("İptal"):
                 st.session_state['delete_stage'] = 0
                 st.rerun()
@@ -1098,17 +1043,14 @@ elif page == "Katılımcı Yönetimi":
             
             if st.button("🔥 ONKAYLA VE SİL 🔥", type="primary"):
                 if user_otp == st.session_state.get('generated_otp'):
-                    # SİLME İŞLEMİ
                     supabase.table(TABLE_TAHMIN).delete().neq("id", 0).execute()
                     supabase.table(TABLE_KATILIMCI).delete().neq("id", 0).execute()
-                    
                     st.success("Tüm veriler başarıyla silindi ve sistem sıfırlandı.")
                     st.session_state['delete_stage'] = 0
                     time.sleep(3)
                     st.rerun()
                 else:
                     st.error("Hatalı onay kodu!")
-            
             if st.button("Vazgeç"):
                 st.session_state['delete_stage'] = 0
                 st.rerun()
