@@ -214,6 +214,7 @@ def fetch_bis_cbpol_tr(start_date: datetime.date, end_date: datetime.date) -> tu
         out["TIME_PERIOD"] = pd.to_datetime(out["TIME_PERIOD"], errors="coerce")
         out = out.dropna(subset=["TIME_PERIOD"])
         out["Donem"] = out["TIME_PERIOD"].dt.strftime("%Y-%m")
+        out["Tarih"] = out["TIME_PERIOD"].dt.strftime("%d-%m-%Y")
         out["REPO_RATE"] = pd.to_numeric(out["OBS_VALUE"], errors="coerce")
         return out[["Donem", "REPO_RATE"]].sort_values(["Donem"]), None
     except Exception as e: return pd.DataFrame(), str(e)
@@ -256,7 +257,6 @@ def create_custom_pdf_report(report_data):
     use_cust = (fr is not None); font = "DejaVu" if use_cust else "Helvetica"; fallback = not use_cust
     class RPT(FPDF):
         def header(self):
-            # LOGO KODU KALDIRILDI - HATA GİDERİLDİ
             self.ln(25)
         def footer(self):
             self.set_y(-15); self.set_font(font, '', 8); self.set_text_color(128); self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
@@ -289,7 +289,6 @@ def create_custom_pdf_report(report_data):
 
 def create_word_report(report_data):
     doc = Document()
-    # LOGO KODU KALDIRILDI
     title = doc.add_heading(report_data['title'], 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_info = doc.add_paragraph()
@@ -733,8 +732,17 @@ elif page == "Dashboard":
                         fig.add_trace(go.Scatter(x=ud[x_axis_col], y=ud[y], mode='markers', error_y=dict(type='data', symmetric=False, array=ud[max_c]-ud[y], arrayminus=ud[y]-ud[min_c], color='gray', width=1), showlegend=False, hoverinfo='skip', marker=dict(size=0, opacity=0)))
                 st.plotly_chart(fig, use_container_width=True)
             
-            c1, c2 = st.columns(2); with c1: plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", "ppk"); with c2: plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
-            c3, c4 = st.columns(2); with c3: plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay"); with c4: plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf (Veya Yıllık)", "enf_yil")
+            c1, c2 = st.columns(2)
+            with c1:
+                plot("tahmin_ppk_faiz", "min_ppk_faiz", "max_ppk_faiz", "PPK Karar", "ppk")
+            with c2:
+                plot("tahmin_yilsonu_faiz", "min_yilsonu_faiz", "max_yilsonu_faiz", "Sene Sonu Faiz", None)
+                
+            c3, c4 = st.columns(2)
+            with c3:
+                plot("tahmin_aylik_enf", "min_aylik_enf", "max_aylik_enf", "Aylık Enf", "enf_ay")
+            with c4:
+                plot("tahmin_yilsonu_enf", "min_yilsonu_enf", "max_yilsonu_enf", "YS Enf (Veya Yıllık)", "enf_yil")
 
         with tabs[1]:
             pers = sorted(list(target_df['donem'].unique()), reverse=True)
