@@ -32,7 +32,7 @@ try:
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 except ImportError:
-    st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter requests fpdf plotly pandas supabase")
+    st.error("Lütfen gerekli kütüphaneleri yükleyin: pip install python-docx xlsxwriter requests fpdf plotly pandas supabase openpyxl")
     st.stop()
 
 # --- BAĞLANTI ---
@@ -103,7 +103,10 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     """
     Veri girişindeki 'ezme' (overwrite) sorununu çözen akıllı güncelleme fonksiyonu.
     """
-    date_str = forecast_date.strftime("%Y-%m-%d")
+    if isinstance(forecast_date, str):
+        date_str = forecast_date
+    else:
+        date_str = forecast_date.strftime("%Y-%m-%d")
     
     # 1. Mevcut kaydı kontrol et
     check_res = supabase.table(TABLE_TAHMIN).select("*").eq("kullanici_adi", user).eq("donem", period).execute()
@@ -365,66 +368,6 @@ def create_excel_dashboard(df_source):
     workbook.close()
     return output.getvalue()
 
-# --- WORD RAPOR OLUŞTURUCU ---
-def create_word_report(report_data):
-    doc = Document()
-    logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/TCMB_logo.svg/500px-TCMB_logo.svg.png"
-    try:
-        r = requests.get(logo_url, timeout=5)
-        if r.status_code == 200:
-            with io.BytesIO(r.content) as image_stream:
-                logo_par = doc.add_paragraph()
-                logo_par.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                run = logo_par.add_run()
-                run.add_picture(image_stream, width=Inches(1.2))
-    except: pass
-
-    title = doc.add_heading(report_data['title'], 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_info = doc.add_paragraph()
-    p_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run_unit = p_info.add_run(report_data['unit'] + "\n")
-    run_unit.bold = True
-    run_unit.font.size = Pt(12)
-    run_date = p_info.add_run(report_data['date'])
-    run_date.italic = True
-    doc.add_paragraph("") 
-
-    if report_data['body']:
-        p_body = doc.add_paragraph(report_data['body'])
-        p_body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-
-    for block in report_data['content_blocks']:
-        doc.add_paragraph("")
-        if block.get('title'):
-            h = doc.add_heading(block['title'], level=2)
-            h.runs[0].font.color.rgb = RGBColor(180, 0, 0)
-
-        if block['type'] == 'chart':
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-                try:
-                    block['fig'].write_image(tmpfile.name, width=1000, height=500, scale=2)
-                    doc.add_picture(tmpfile.name, width=Inches(6.5))
-                except: pass
-            try: os.remove(tmpfile.name)
-            except: pass
-
-        elif block['type'] == 'table':
-            df_table = block['df']
-            table = doc.add_table(rows=1, cols=len(df_table.columns))
-            table.style = 'Light Shading Accent 1'
-            hdr_cells = table.rows[0].cells
-            for i, col_name in enumerate(df_table.columns):
-                hdr_cells[i].text = str(col_name)
-            for _, row in df_table.iterrows():
-                row_cells = table.add_row().cells
-                for i, item in enumerate(row):
-                    row_cells[i].text = str(item)
-
-    output = io.BytesIO()
-    doc.save(output)
-    return output.getvalue()
-
 # --- PDF MOTORU ---
 def check_and_download_font():
     paths = {"DejaVuSans.ttf": "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Regular.ttf", "DejaVuSans-Bold.ttf": "https://github.com/google/fonts/raw/main/ofl/dejavusans/DejaVuSans-Bold.ttf"}
@@ -522,7 +465,7 @@ if not st.session_state['giris_yapildi']:
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("📊 Menü")
-    page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "📈 Piyasa Verileri (EVDS)", "📄 Rapor Oluştur", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
+    page = st.radio("Git:", ["Gelişmiş Veri Havuzu (Yönetim)", "Dashboard", "🔥 Isı Haritası", "📈 Piyasa Verileri (EVDS)", "📄 Rapor Oluştur", "📥 Toplu Veri Yükleme (Excel)", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
 
 def get_participant_selection():
     res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
@@ -591,7 +534,7 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                     **{c: st.column_config.NumberColumn(c, format="%.2f") for c in final_cols if "tahmin" in c or "min" in c or "max" in c}
                 }
                 
-                st.dataframe(df_f[final_cols], column_config=col_cfg, use_container_width=True, height=600)
+                st.dataframe(df_f[final_cols].sort_values(by="tahmin_tarihi", ascending=False), column_config=col_cfg, use_container_width=True, height=600)
                 
                 if not df_f.empty:
                     df_ex = df_f.copy(); df_ex['tahmin_tarihi'] = df_ex['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
@@ -1227,31 +1170,103 @@ elif page == "📄 Rapor Oluştur":
     else: st.info("Veri yok.")
 
 # ========================================================
-# SAYFA: KATILIMCI YÖNETİMİ
+# SAYFA: TOPLU VERİ YÜKLEME (EXCEL)
 # ========================================================
-elif page == "Katılımcı Yönetimi":
-    st.header("👥 Katılımcı Yönetimi")
-    with st.expander("➕ Yeni Kişi Ekle", expanded=True):
-        with st.form("new_kat"):
-            c1, c2 = st.columns(2)
-            ad = c1.text_input("Ad / Kurum"); cat = c2.radio("Kategori", ["Bireysel", "Kurumsal"], horizontal=True)
-            src = st.text_input("Kaynak (Opsiyonel)")
-            if st.form_submit_button("Ekle"):
-                if ad:
-                    try: 
-                        supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": normalize_name(ad), "kategori": cat, "anket_kaynagi": src or None}).execute()
-                        st.toast("Eklendi")
-                    except: st.error("Hata")
-    
-    res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
-    df = pd.DataFrame(res.data)
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-        ks = st.selectbox("Silinecek Kişi", df["ad_soyad"].unique())
-        if st.button("🚫 Kişiyi ve Tüm Verilerini Sil"):
-            supabase.table(TABLE_TAHMIN).delete().eq("kullanici_adi", ks).execute()
-            supabase.table(TABLE_KATILIMCI).delete().eq("ad_soyad", ks).execute()
-            st.rerun()
+elif page == "📥 Toplu Veri Yükleme (Excel)":
+    st.header("📥 Toplu Veri Yükleme")
+    st.info("Bu alandan çok sayıda veriyi Excel formatında yükleyebilirsiniz. Lütfen önce şablonu indirin.")
+
+    # Şablon Oluşturma
+    def generate_excel_template():
+        df_temp = pd.DataFrame(columns=[
+            "Katılımcı Adı", "Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)", 
+            "Kategori (Bireysel/Kurumsal)", "Link", "PPK Tahmin", 
+            "Yıl Sonu Faiz", "Aylık Enf", "Yıllık Enf", 
+            "Yıl Sonu Enf", "N Sayısı"
+        ])
+        # Örnek Satır
+        df_temp.loc[0] = ["Örnek Banka", "2025-01", "2024-12-25", "Kurumsal", "", 45.0, 40.0, 3.5, 45.5, 42.0, 15]
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df_temp.to_excel(writer, index=False, sheet_name='Veri_Girisi')
+        return output.getvalue()
+
+    col_d, col_u = st.columns([1, 2])
+    with col_d:
+        st.subheader("1. Şablon İndir")
+        st.download_button(
+            label="📥 Excel Şablonunu İndir",
+            data=generate_excel_template(),
+            file_name="Veri_Yukleme_Sablonu.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
+
+    with col_u:
+        st.subheader("2. Dosya Yükle")
+        uploaded_file = st.file_uploader("Excel Dosyası Seç (.xlsx)", type=["xlsx"])
+
+    if uploaded_file:
+        try:
+            df_upload = pd.read_excel(uploaded_file)
+            st.success("Dosya okundu. Önizleme:")
+            st.dataframe(df_upload.head(), use_container_width=True)
+            
+            if st.button("🚀 Verileri Veritabanına Yaz"):
+                progress_bar = st.progress(0)
+                success_count = 0
+                error_count = 0
+                
+                total_rows = len(df_upload)
+                
+                for index, row in df_upload.iterrows():
+                    try:
+                        # Veri Hazırlığı
+                        user = str(row["Katılımcı Adı"]).strip()
+                        period = str(row["Dönem (YYYY-AA)"]).strip()
+                        cat = str(row["Kategori (Bireysel/Kurumsal)"]).strip()
+                        
+                        # Tarih İşleme
+                        raw_date = row["Tarih (YYYY-AA-GG)"]
+                        if isinstance(raw_date, pd.Timestamp):
+                            forecast_date = raw_date.strftime("%Y-%m-%d")
+                        else:
+                            forecast_date = str(raw_date).split()[0] # Saat kısmını at
+                            
+                        link = str(row["Link"]) if pd.notnull(row["Link"]) else None
+                        
+                        def clean_val(val):
+                            try:
+                                v = float(val)
+                                return v if pd.notnull(v) else None
+                            except: return None
+
+                        data_dict = {
+                            "tahmin_ppk_faiz": clean_val(row["PPK Tahmin"]),
+                            "tahmin_yilsonu_faiz": clean_val(row["Yıl Sonu Faiz"]),
+                            "tahmin_aylik_enf": clean_val(row["Aylık Enf"]),
+                            "tahmin_yillik_enf": clean_val(row["Yıllık Enf"]),
+                            "tahmin_yilsonu_enf": clean_val(row["Yıl Sonu Enf"]),
+                            "katilimci_sayisi": int(clean_val(row["N Sayısı"]) or 0)
+                        }
+                        
+                        # Kaydet
+                        upsert_tahmin(user, period, cat, forecast_date, link, data_dict)
+                        success_count += 1
+                        
+                    except Exception as e:
+                        error_count += 1
+                        st.error(f"Satır {index+1} hatası: {e}")
+                    
+                    progress_bar.progress((index + 1) / total_rows)
+                
+                st.toast(f"İşlem Tamamlandı! Başarılı: {success_count}, Hata: {error_count}", icon="✅")
+                time.sleep(1)
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"Dosya okuma hatası: {e}")
 
 # ========================================================
 # SAYFA: VERİ GİRİŞ EKRANLARI (MULTI-WRITE ÖZELLİKLİ - PPK & ENFLASYON)
