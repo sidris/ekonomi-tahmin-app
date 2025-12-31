@@ -106,7 +106,7 @@ def clean_and_sort_data(df):
         df["donem_date"] = pd.to_datetime(df["donem"], format="%Y-%m", errors='coerce')
         df = df.sort_values(by="donem_date")
     if "tahmin_tarihi" in df.columns:
-        df["tahmin_tarihi"] = pd.to_datetime(df["tahmin_tarihi"])
+        df["tahmin_tarihi"] = pd.to_datetime(df["tahmin_tarihi"], errors='coerce')
     return df
 
 def parse_range_input(text_input, default_median=0.0):
@@ -123,26 +123,39 @@ def parse_range_input(text_input, default_median=0.0):
     return default_median, 0.0, 0.0, False
 
 def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
+    # Tarih formatını garanti altına al (YYYY-MM-DD)
     if isinstance(forecast_date, str):
         date_str = forecast_date
     else:
         date_str = forecast_date.strftime("%Y-%m-%d")
     
-    check_res = supabase.table(TABLE_TAHMIN).select("*").eq("kullanici_adi", user).eq("donem", period).execute()
+    # 1. Mevcut kaydı kontrol et (Çakışma Kontrolü)
+    # Supabase'e gönderirken tarih string olmalı
+    check_res = supabase.table(TABLE_TAHMIN).select("*")\
+        .eq("kullanici_adi", user)\
+        .eq("donem", period)\
+        .eq("tahmin_tarihi", date_str)\
+        .execute()
     
     existing_data = {}
     record_id = None
     
     if check_res.data:
+        # Kayıt bulundu, ID'sini al
         existing_data = check_res.data[0]
         record_id = existing_data['id']
+        # Supabase'den gelen sistem alanlarını temizle (update için)
         for k in ['id', 'created_at', 'kullanici_adi', 'donem']: 
             if k in existing_data: del existing_data[k]
 
+    # 2. Yeni gelen verideki 0 veya boş değerleri temizle
     new_input_data = {k: v for k, v in data_dict.items() if v is not None and v != 0 and v != ""}
+    
+    # 3. Eski veri ile yeniyi birleştir
     final_data = existing_data.copy()
     final_data.update(new_input_data)
     
+    # Zorunlu alanları ekle/güncelle
     final_data.update({
         "kullanici_adi": user, 
         "donem": period, 
@@ -152,10 +165,13 @@ def upsert_tahmin(user, period, category, forecast_date, link, data_dict):
     
     if link: final_data["kaynak_link"] = link
 
+    # 4. Kayıt veya Güncelleme
     if record_id:
+        # ID varsa GÜNCELLE (UPDATE)
         supabase.table(TABLE_TAHMIN).update(final_data).eq("id", record_id).execute()
         return "updated"
     else:
+        # ID yoksa EKLE (INSERT)
         supabase.table(TABLE_TAHMIN).insert(final_data).execute()
         return "inserted"
 
@@ -164,26 +180,14 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Tahminler')
     return output.getvalue()
 
-# --- E-POSTA GÖNDERİM FONKSİYONU ---
 def send_verification_email(code):
     if not SMTP_EMAIL or not SMTP_PASSWORD:
-        return False, "SMTP Ayarları eksik! Lütfen secrets.toml dosyasını kontrol edin."
-    
+        return False, "SMTP Ayarları eksik! secrets.toml kontrol ediniz."
     try:
-        msg = MIMEText(f"""
-        Merhaba,
-        
-        Finansal Tahmin Terminali veritabanını TAMAMEN SİLMEK için bir talep oluşturuldu.
-        
-        Onay Kodunuz: {code}
-        
-        Eğer bu işlemi siz başlatmadıysanız, lütfen bu mesajı dikkate almayın.
-        """)
-        msg['Subject'] = '🚨 VERİ SİLME ONAY KODU'
+        msg = MIMEText(f"SİLME ONAY KODU: {code}")
+        msg['Subject'] = '🚨 VERİ SİLME ONAYI'
         msg['From'] = SMTP_EMAIL
-        msg['To'] = "s.idrisoglu@gmail.com" # Sabitlenen mail adresi
-
-        # Gmail SSL portu 465
+        msg['To'] = "s.idrisoglu@gmail.com"
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.sendmail(SMTP_EMAIL, "s.idrisoglu@gmail.com", msg.as_string())
@@ -290,10 +294,8 @@ def create_custom_pdf_report(report_data):
     fr, fb = check_and_download_font()
     use_cust = (fr is not None); font = "DejaVu" if use_cust else "Helvetica"; fallback = not use_cust
     class RPT(FPDF):
-        def header(self):
-            self.ln(25)
-        def footer(self):
-            self.set_y(-15); self.set_font(font, '', 8); self.set_text_color(128); self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
+        def header(self): self.ln(25)
+        def footer(self): self.set_y(-15); self.set_font(font, '', 8); self.set_text_color(128); self.cell(0, 10, f'Sayfa {self.page_no()}', align='C')
     pdf = RPT(); 
     if use_cust: pdf.add_font("DejaVu", "", fr, uni=True); pdf.add_font("DejaVu", "B", fb, uni=True)
     pdf.add_page(); pdf.set_text_color(0)
@@ -416,15 +418,18 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
     st.title("🗃️ Veri Havuzu ve Yönetim Paneli")
     res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
     df_t = pd.DataFrame(res_t.data)
+    
     if not df_t.empty:
         df_t = clean_and_sort_data(df_t)
         res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "kategori", "anket_kaynagi").execute()
         df_k = pd.DataFrame(res_k.data)
+        
         if not df_k.empty:
             df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
             df_full['kategori'] = df_full['kategori_y'].fillna('Bireysel')
             df_full['anket_kaynagi'] = df_full['anket_kaynagi'].fillna('-')
             df_full['tahmin_tarihi'] = pd.to_datetime(df_full['tahmin_tarihi'])
+
             with st.container():
                 c1, c2, c3, c4, c5 = st.columns(5)
                 sel_cat = c1.selectbox("Kategori", ["Tümü"] + list(df_full['kategori'].unique()))
@@ -432,13 +437,16 @@ if page == "Gelişmiş Veri Havuzu (Yönetim)":
                 sel_user = c3.selectbox("Katılımcı", ["Tümü"] + sorted(list(df_full['kullanici_adi'].unique())))
                 sort_option = c4.selectbox("Sıralama", ["Tarih (Yeniden Eskiye)", "Tarih (Eskiden Yeniye)", "Son Eklenen (ID)"])
                 admin_mode = c5.toggle("🛠️ Yönetici Modu")
+
             df_f = df_full.copy()
             if sel_cat != "Tümü": df_f = df_f[df_f['kategori'] == sel_cat]
             if sel_period != "Tümü": df_f = df_f[df_f['donem'] == sel_period]
             if sel_user != "Tümü": df_f = df_f[df_f['kullanici_adi'] == sel_user]
+            
             if sort_option == "Tarih (Yeniden Eskiye)": df_f = df_f.sort_values(by="tahmin_tarihi", ascending=False)
             elif sort_option == "Tarih (Eskiden Yeniye)": df_f = df_f.sort_values(by="tahmin_tarihi", ascending=True)
             else: df_f = df_f.sort_values(by="id", ascending=False)
+            
             if not admin_mode:
                 st.markdown("---")
                 cols = ["tahmin_tarihi", "donem", "kullanici_adi", "kategori", "anket_kaynagi", "kaynak_link", "katilimci_sayisi", "tahmin_ppk_faiz", "tahmin_yilsonu_faiz", "tahmin_aylik_enf", "tahmin_yillik_enf", "tahmin_yilsonu_enf"]
@@ -518,7 +526,8 @@ elif page == "Dashboard":
 
     if not df_t.empty and not df_k.empty:
         df_t = clean_and_sort_data(df_t)
-        df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
+        # HATA DÜZELTME: NaT kontrolü (Dashboard'un çökmesini engeller)
+        df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'], errors='coerce')
         df_t = df_t.sort_values(by='tahmin_tarihi')
         
         dash_evds_start = datetime.date(2023, 1, 1); dash_evds_end = datetime.date(2025, 12, 31)
@@ -535,13 +544,18 @@ elif page == "Dashboard":
         
         for d in [df_history, df_latest]:
             d['gorunen_isim'] = d.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
-            d['hover_text'] = d.apply(lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}" if pd.notnull(x['katilimci_sayisi']) else "", axis=1)
+            d['hover_text'] = d.apply(lambda x: f"Tarih: {x['tahmin_tarihi'].strftime('%d-%m-%Y')}<br>N={int(x['katilimci_sayisi'])}" if pd.notnull(x['tahmin_tarihi']) and pd.notnull(x['katilimci_sayisi']) else "", axis=1)
             d['kategori'] = d['kategori'].fillna('Bireysel'); d['anket_kaynagi'] = d['anket_kaynagi'].fillna('-'); d['yil'] = d['donem'].apply(lambda x: x.split('-')[0])
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Toplam Katılımcı", df_latest['kullanici_adi'].nunique())
         c2.metric("Toplam Tahmin Verisi", len(df_latest))
-        c3.metric("Son Güncelleme", df_latest['tahmin_tarihi'].max().strftime('%d.%m.%Y'))
+        
+        # HATA DÜZELTME: NaT kontrolü (Tarih yoksa tire koy)
+        max_date = df_latest['tahmin_tarihi'].max()
+        display_date = max_date.strftime('%d.%m.%Y') if pd.notnull(max_date) else "-"
+        c3.metric("Son Güncelleme", display_date)
+        
         st.markdown("---")
 
         st.subheader("🏆 Dönemin En İsabetli Tahmincileri")
@@ -675,78 +689,6 @@ elif page == "Dashboard":
             st.plotly_chart(fig, use_container_width=True)
 
 # ========================================================
-# SAYFA: ISI HARİTASI
-# ========================================================
-elif page == "🔥 Isı Haritası":
-    st.header("🔥 Tahmin Isı Haritası")
-    res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
-    df_t = pd.DataFrame(res_t.data)
-    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
-    df_k = pd.DataFrame(res_k.data)
-
-    if not df_t.empty and not df_k.empty:
-        df_t = clean_and_sort_data(df_t)
-        df_t['tahmin_tarihi'] = pd.to_datetime(df_t['tahmin_tarihi'])
-        df_t = df_t.sort_values(by='tahmin_tarihi')
-        df_full = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
-        df_full['gorunen_isim'] = df_full.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
-
-        with st.expander("⚙️ Harita Ayarları", expanded=True):
-            view_mode = st.radio("Görünüm Modu", ["📅 Hedef Dönem Karşılaştırması", "⏳ Zaman İçindeki Değişim (Revizyon)"], horizontal=True)
-            st.markdown("---")
-            c1, c2, c3 = st.columns(3)
-            metrics = {"PPK Faizi": "tahmin_ppk_faiz", "Yıl Sonu Faiz": "tahmin_yilsonu_faiz", "Aylık Enflasyon": "tahmin_aylik_enf", "Yıl Sonu Enflasyon": "tahmin_yilsonu_enf"}
-            sel_metric_label = c1.selectbox("Veri Seti", list(metrics.keys()))
-            sel_metric = metrics[sel_metric_label]
-            
-            all_users = sorted(df_full['gorunen_isim'].unique())
-            sel_users = c2.multiselect("Katılımcılar", all_users, default=all_users[:10] if len(all_users)>0 else [])
-            all_periods = sorted(df_full['donem'].unique(), reverse=True)
-            
-            if view_mode.startswith("📅"):
-                sel_periods = c3.multiselect("Hedef Dönemler", all_periods, default=all_periods[:6] if len(all_periods)>0 else [])
-                if not sel_users or not sel_periods: st.stop()
-                df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & df_full['donem'].isin(sel_periods)].copy()
-                df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'donem'], keep='last')
-                piv_col = 'donem'
-            else:
-                target_period = c3.selectbox("Hangi Hedefin Geçmişini İzliceksiniz?", all_periods)
-                time_granularity = c3.radio("Zaman Dilimi", ["🗓️ Aylık (Son Veri)", "📆 Günlük (Detaylı)"])
-                if not sel_users or not target_period: st.stop()
-                df_f = df_full[df_full['gorunen_isim'].isin(sel_users) & (df_full['donem'] == target_period)].copy()
-                if "Günlük" in time_granularity: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m-%d')
-                else: df_f['tahmin_zaman'] = df_f['tahmin_tarihi'].dt.strftime('%Y-%m')
-                df_f = df_f.sort_values(by='tahmin_tarihi').drop_duplicates(subset=['kullanici_adi', 'tahmin_zaman'], keep='last')
-                piv_col = 'tahmin_zaman'
-
-        if df_f.empty: st.warning("Veri yok."); st.stop()
-        pivot_df = df_f.pivot(index='gorunen_isim', columns=piv_col, values=sel_metric)
-        pivot_df = pivot_df.reindex(columns=sorted(pivot_df.columns))
-
-        def highlight(data):
-            styles = pd.DataFrame('', index=data.index, columns=data.columns)
-            for idx, row in data.iterrows():
-                prev = None; first = False
-                for col in data.columns:
-                    val = row[col]
-                    if pd.isna(val): continue
-                    st = ''
-                    if not first: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'; first=True
-                    else:
-                        if prev is not None:
-                            if val > prev: st='background-color: #FFCDD2; color: #B71C1C; font-weight: bold; border: 1px solid white;'
-                            elif val < prev: st='background-color: #C8E6C9; color: #1B5E20; font-weight: bold; border: 1px solid white;'
-                            else: st='background-color: #FFF9C4; color: black; font-weight: bold; border: 1px solid white;'
-                    styles.at[idx, col] = st
-                    prev = val
-            return styles
-
-        st.markdown(f"### 🔥 {sel_metric_label} Analizi")
-        st.dataframe(pivot_df.style.apply(highlight, axis=None).format("{:.2f}"), use_container_width=True, height=len(sel_users)*50+100)
-        st.caption("🟡: İlk Veri / Değişim Yok | 🔴: Yükseliş | 🟢: Düşüş")
-    else: st.info("Veri yok.")
-
-# ========================================================
 # SAYFA: TOPLU VERİ YÜKLEME (EXCEL)
 # ========================================================
 elif page == "📥 Toplu Veri Yükleme (Excel)":
@@ -861,6 +803,7 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                                 try: v = float(val); return v if pd.notnull(v) else None
                                 except: return None
                             
+                            # GÜNCELLENMİŞ EXCEL SÜTUNLARI
                             data_main = {
                                 "tahmin_ppk_faiz": cv(row.get("PPK Medyan")),
                                 "min_ppk_faiz": cv(row.get("PPK Min")),
