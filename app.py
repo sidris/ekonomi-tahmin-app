@@ -227,18 +227,26 @@ if page == "Dashboard":
     res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad", "anket_kaynagi").execute()
     df_k = pd.DataFrame(res_k.data)
 
-    if not df_t.empty and not df_k.empty:
+    if not df_t.empty: # Sadece df_t doluysa yeterli, df_k boşsa da veriyi göstermeliyiz
         df_t = clean_and_sort_data(df_t)
         
         dash_evds_start = datetime.date(2023, 1, 1); dash_evds_end = datetime.date(2025, 12, 31)
         realized_df, err = fetch_market_data_adapter(EVDS_API_KEY, dash_evds_start, dash_evds_end)
         
-        df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="inner")
+        # DÜZELTME: INNER JOIN -> LEFT JOIN
+        # Böylece Katılımcılar tablosunda olmayan kişiler de dashboardda görünür
+        if not df_k.empty:
+            df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
+        else:
+            df_history = df_t.copy()
+            df_history["anket_kaynagi"] = None
+            df_history["kategori"] = "Bireysel"
+
         df_latest = df_history.sort_values(by=['anket_donemi']).drop_duplicates(subset=['kullanici_adi', 'hedef_donemi'], keep='last')
         
         for d in [df_history, df_latest]:
-            d['gorunen_isim'] = d.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x['anket_kaynagi']) and x['anket_kaynagi'] != '' else x['kullanici_adi'], axis=1)
-            d['kategori'] = d['kategori'].fillna('Bireysel')
+            d['gorunen_isim'] = d.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x.get('anket_kaynagi')) and x.get('anket_kaynagi') != '' else x['kullanici_adi'], axis=1)
+            d['kategori'] = d.get('kategori', pd.Series(['Bireysel']*len(d))).fillna('Bireysel')
             d['hedef_yil'] = d['hedef_donemi'].apply(lambda x: x.split('-')[0])
 
         c1, c2, c3 = st.columns(3)
@@ -251,7 +259,11 @@ if page == "Dashboard":
         
         with st.sidebar:
             st.markdown("### 🔍 Dashboard Filtreleri")
-            cat_filter = st.multiselect("Kategori", ["Bireysel", "Kurumsal"], default=["Bireysel", "Kurumsal"])
+            # Kategorileri veriden dinamik alalım
+            all_cats = list(df_latest['kategori'].unique())
+            if not all_cats: all_cats = ["Bireysel", "Kurumsal"]
+            cat_filter = st.multiselect("Kategori", all_cats, default=all_cats)
+            
             df_filt_base = df_latest[df_latest['kategori'].isin(cat_filter)]
             avail_yr = sorted(df_filt_base['hedef_yil'].unique())
             yr_filter = st.multiselect("Hedef Yıl", avail_yr, default=avail_yr)
@@ -422,6 +434,10 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
     if uploaded_file:
         df_upload = pd.read_excel(uploaded_file)
         if st.button("🚀 Verileri Veritabanına İşle"):
+            # DÜZELTME 2: Önce mevcut kullanıcıları çekelim
+            existing_users_response = supabase.table(TABLE_KATILIMCI).select("ad_soyad").execute()
+            existing_users_set = {r['ad_soyad'] for r in existing_users_response.data}
+            
             progress_bar = st.progress(0); success_count = 0
             for index, row in df_upload.iterrows():
                 try:
@@ -430,6 +446,13 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                     cat = str(row.get("Kategori", "Bireysel"))
                     link = str(row.get("Link", ""))
                     raw_date = row["Tarih (YYYY-AA-GG)"]
+                    
+                    # DÜZELTME 2 (Devam): Kullanıcı yoksa EKLE
+                    if user and (user not in existing_users_set):
+                        try:
+                            supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": user, "kategori": cat}).execute()
+                            existing_users_set.add(user) # Listeye ekle ki tekrar denemesin
+                        except: pass # Hata olursa geç (muhtemelen vardır)
                     
                     def cv(val): 
                         try: v = float(val); return v if pd.notnull(v) else None
