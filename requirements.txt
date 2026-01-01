@@ -5,3 +5,4 @@ plotly
 requests
 xlsxwriter
 openpyxl
+matplotlib
