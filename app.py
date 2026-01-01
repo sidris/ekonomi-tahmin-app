@@ -294,23 +294,87 @@ if page == "Dashboard":
     else: st.warning("Veri havuzu boş.")
 
 # ========================================================
-# SAYFA: GELİŞMİŞ VERİ HAVUZU
+# SAYFA: GELİŞMİŞ VERİ HAVUZU (TOPLU SİLME MODU)
 # ========================================================
 elif page == "Gelişmiş Veri Havuzu":
-    st.title("🗃️ Tüm Kayıtlar")
+    st.title("🗃️ Gelişmiş Veri Havuzu")
+    
+    # 1. Verileri Çek
     res_t = supabase.table(TABLE_TAHMIN).select("*").order("tahmin_tarihi", desc=True).limit(2000).execute()
     df_t = pd.DataFrame(res_t.data)
     
     if not df_t.empty:
         df_t = clean_and_sort_data(df_t)
-        st.download_button("📥 Excel İndir", to_excel(df_t), "tum_veriler.xlsx", type="primary")
-        st.dataframe(df_t[['tahmin_tarihi', 'kullanici_adi', 'anket_donemi', 'hedef_donemi', 'tahmin_ppk_faiz', 'tahmin_yilsonu_enf']], use_container_width=True)
         
-        if st.checkbox("🗑️ Kayıt Silme Modunu Aç"):
-            id_to_del = st.number_input("Silinecek ID", step=1)
-            if st.button("Sil"):
-                supabase.table(TABLE_TAHMIN).delete().eq("id", id_to_del).execute()
-                st.success("Silindi!"); time.sleep(1); st.rerun()
+        # 2. Silme Modu Anahtarı (Toggle)
+        col_header, col_toggle = st.columns([3, 1])
+        with col_header:
+            st.markdown("### Tüm Kayıtlar")
+        with col_toggle:
+            silme_modu = st.toggle("🗑️ Kayıt Silme Modunu Aç", help="Listede seçim kutucuklarını aktif eder.")
+
+        # --- SİLME MODU AÇIKSA ---
+        if silme_modu:
+            st.warning("⚠️ Aşağıdaki listeden silmek istediğiniz kayıtların yanındaki kutucuğu işaretleyin ve en alttaki butona basın.")
+            
+            # Checkbox için geçici bir sütun ekleyelim
+            df_t.insert(0, "Sec", False)
+            
+            # Tabloyu düzenlenebilir modda göster (Sadece 'Sec' sütunu değişebilir)
+            # Görünümün düzgün olması için ID ve Sec başa alınıyor
+            column_order = ["Sec", "id", "kullanici_adi", "anket_donemi", "hedef_donemi", "tahmin_yilsonu_enf", "tahmin_ppk_faiz", "tahmin_tarihi"]
+            remaining_cols = [c for c in df_t.columns if c not in column_order]
+            final_cols = column_order + remaining_cols
+            
+            edited_df = st.data_editor(
+                df_t[final_cols],
+                column_config={
+                    "Sec": st.column_config.CheckboxColumn(
+                        "Sil?",
+                        help="Silmek için seçiniz",
+                        default=False,
+                    ),
+                    "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"),
+                },
+                disabled=[c for c in df_t.columns if c != "Sec"], # Sadece checkbox'a izin ver
+                use_container_width=True,
+                hide_index=True,
+                key="editor_silme"
+            )
+            
+            # Seçilenleri Filtrele
+            secilenler = edited_df[edited_df["Sec"] == True]
+            
+            if not secilenler.empty:
+                st.markdown(f"--- \n🔴 **{len(secilenler)}** adet kayıt seçildi.")
+                
+                if st.button("🗑️ SEÇİLENLERİ KALICI OLARAK SİL", type="primary"):
+                    ids_to_delete = secilenler["id"].tolist()
+                    try:
+                        # Supabase'den toplu silme işlemi (.in_ komutu ile)
+                        supabase.table(TABLE_TAHMIN).delete().in_("id", ids_to_delete).execute()
+                        st.success(f"{len(ids_to_delete)} kayıt başarıyla silindi!")
+                        time.sleep(1.5)
+                        st.rerun() # Sayfayı yenile
+                    except Exception as e:
+                        st.error(f"Silme sırasında hata oluştu: {e}")
+            else:
+                st.info("Silmek için listeden kayıt seçiniz.")
+
+        # --- SİLME MODU KAPALIYSA (NORMAL GÖRÜNÜM) ---
+        else:
+            display_cols = ["id", "kullanici_adi", "anket_donemi", "hedef_donemi", "tahmin_yilsonu_enf", "tahmin_ppk_faiz", "tahmin_tarihi"]
+            st.dataframe(
+                df_t[display_cols], 
+                use_container_width=True,
+                column_config={
+                    "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"),
+                }
+            )
+            st.download_button("📥 Excel İndir", to_excel(df_t), "tum_veriler.xlsx", type="primary")
+
+    else:
+        st.warning("Veri havuzunda henüz hiç kayıt yok.")
 
 # ========================================================
 # SAYFA: ISI HARİTASI
