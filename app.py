@@ -13,7 +13,7 @@ from email.mime.text import MIMEText
 import random
 
 # --- 1. AYARLAR VE TASARIM ---
-st.set_page_config(page_title="Finansal Tahmin Terminali v3", layout="wide", page_icon="📊", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Finansal Tahmin Terminali v4", layout="wide", page_icon="📊", initial_sidebar_state="expanded")
 
 # --- CUSTOM CSS ---
 st.markdown("""
@@ -110,19 +110,6 @@ def to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='Veriler')
     return output.getvalue()
 
-def send_verification_email(code, action_desc="Veri Silme"):
-    if not SMTP_EMAIL or not SMTP_PASSWORD: return False, "SMTP Ayarları eksik!"
-    try:
-        msg = MIMEText(f"Kod: {code}")
-        msg['Subject'] = f'ONAY KODU: {action_desc}'
-        msg['From'] = SMTP_EMAIL
-        msg['To'] = "s.idrisoglu@gmail.com"
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(SMTP_EMAIL, SMTP_PASSWORD)
-            server.sendmail(SMTP_EMAIL, "s.idrisoglu@gmail.com", msg.as_string())
-        return True, "Kod gönderildi."
-    except Exception as e: return False, f"Hata: {str(e)}"
-
 # --- EVDS VE BIS FONKSİYONLARI ---
 def _evds_headers(api_key: str) -> dict: return {"key": api_key, "User-Agent": "Mozilla/5.0"}
 def _evds_url_single(series_code, start_date, end_date, formulas):
@@ -183,7 +170,6 @@ def fetch_market_data_adapter(api_key, start_date, end_date):
         combined = pd.merge(df_inf, df_pol_monthly, on="Donem", how="outer")
     elif not df_inf.empty: combined = df_inf; combined['REPO_RATE'] = None
     elif not df_pol.empty: combined = df_pol.rename(columns={'REPO_RATE': 'REPO_RATE'}); combined['TUFE_Aylik'] = None; combined['TUFE_Yillik'] = None
-    
     combined = combined.rename(columns={'REPO_RATE': 'PPK Faizi', 'TUFE_Aylik': 'Aylık TÜFE', 'TUFE_Yillik': 'Yıllık TÜFE'})
     if 'Tarih' not in combined.columns and 'Donem' in combined.columns: combined['Tarih'] = combined['Donem'] + "-01"
     return combined, None
@@ -193,7 +179,7 @@ if 'giris_yapildi' not in st.session_state: st.session_state['giris_yapildi'] = 
 if not st.session_state['giris_yapildi']:
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        st.markdown("""<div class="login-container"><h1 class="login-header">📊 Finansal Tahmin Terminali v3</h1><p style="color: #666; margin-bottom: 20px;">Lütfen erişim için şifrenizi giriniz.</p></div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="login-container"><h1 class="login-header">📊 Finansal Tahmin Terminali v4</h1><p style="color: #666; margin-bottom: 20px;">Lütfen erişim için şifrenizi giriniz.</p></div>""", unsafe_allow_html=True)
         with st.form("login_form"):
             pwd = st.text_input("Şifre", type="password")
             st.markdown("<br>", unsafe_allow_html=True)
@@ -205,7 +191,7 @@ if not st.session_state['giris_yapildi']:
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("📊 Menü")
-    page = st.radio("Git:", ["Dashboard (Analiz)", "Gelişmiş Veri Havuzu", "🔥 Isı Haritası", "📥 Toplu Veri Yükleme (Excel)", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
+    page = st.radio("Git:", ["Dashboard (Analiz)", "📄 Rapor Oluştur", "Gelişmiş Veri Havuzu", "🔥 Isı Haritası", "📥 Toplu Veri Yükleme (Excel)", "PPK Girişi", "Enflasyon Girişi", "Katılımcı Yönetimi"])
 
 def get_participant_selection():
     res = supabase.table(TABLE_KATILIMCI).select("*").order("ad_soyad").execute()
@@ -218,7 +204,7 @@ def get_participant_selection():
     return name_map[sel], row['kategori'], sel
 
 # ========================================================
-# SAYFA: DASHBOARD (GÜNCELLENMİŞ)
+# SAYFA: DASHBOARD (Analiz)
 # ========================================================
 if page == "Dashboard (Analiz)":
     st.header("Piyasa Analiz Dashboardu")
@@ -231,106 +217,178 @@ if page == "Dashboard (Analiz)":
         # EVDS (Gerçekleşenler)
         dash_evds_start = datetime.date(2023, 1, 1); dash_evds_end = datetime.date(2026, 12, 31)
         realized_df, err = fetch_market_data_adapter(EVDS_API_KEY, dash_evds_start, dash_evds_end)
-        
+    
+    # KATILIMCI BİLGİLERİNİ EŞLE
+    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad, anket_kaynagi, kategori").execute()
+    df_k = pd.DataFrame(res_k.data)
+    
     if df_t.empty:
         st.warning("Henüz tahmin verisi girilmemiş.")
     else:
         df_t = clean_and_sort_data(df_t)
         
-        # --- METRİKLER (KPI) ---
-        son_tahmin = df_t['tahmin_tarihi'].max()
-        son_enf = realized_df['Aylık TÜFE'].iloc[-1] if not realized_df.empty and 'Aylık TÜFE' in realized_df.columns else 0
-        son_ppk = realized_df['PPK Faizi'].iloc[-1] if not realized_df.empty and 'PPK Faizi' in realized_df.columns else 0
-        
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Toplam Tahmin", len(df_t))
-        k2.metric("Son Veri Girişi", son_tahmin.strftime('%d.%m.%Y') if pd.notnull(son_tahmin) else "-")
-        k3.metric("Son Gerçekleşen Aylık Enf.", f"%{son_enf:.2f}")
-        k4.metric("Son Gerçekleşen PPK", f"%{son_ppk:.2f}")
-        
-        st.markdown("---")
+        # Katılımcı bilgilerini Left Join ile birleştir (Silinenler de görünsün)
+        if not df_k.empty:
+            df_history = pd.merge(df_t, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
+        else:
+            df_history = df_t.copy()
+            df_history["kategori"] = "Bireysel"
+            df_history["anket_kaynagi"] = None
 
-        # --- FİLTRELEME ---
+        df_history['gorunen_isim'] = df_history.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x.get('anket_kaynagi')) and x.get('anket_kaynagi') != '' else x['kullanici_adi'], axis=1)
+
+        # --- FILTRELEME ALANI ---
         with st.sidebar:
-            st.markdown("### 🔍 Grafik Ayarları")
-            unique_targets = sorted(df_t['hedef_donemi'].unique())
+            st.markdown("### 🔍 Dashboard Filtreleri")
+            
+            # 1. Katılımcı Filtresi (ÇOKLU SEÇİM)
+            all_users = sorted(df_history['gorunen_isim'].unique())
+            selected_users = st.multiselect("Karşılaştırılacak Katılımcılar", all_users, help="Seçim yapmazsanız GENEL MEDYAN gösterilir. Seçerseniz kişileri kıyaslar.")
+            
+            # 2. Tarih Filtresi
+            unique_targets = sorted(df_history['hedef_donemi'].unique())
             min_target_year = unique_targets[0].split("-")[0] if unique_targets else "2024"
             selected_years = st.multiselect("Hangi Yılların Hedefleri?", sorted(list(set([x.split("-")[0] for x in unique_targets]))), default=[min_target_year, "2025"])
             
-            filtered_df = df_t[df_t['hedef_donemi'].apply(lambda x: x.split("-")[0] in selected_years)]
+            # Veriyi Filtrele
+            if selected_users:
+                # Kullanıcı seçildiyse sadece onları al
+                filtered_df = df_history[df_history['gorunen_isim'].isin(selected_users)]
+            else:
+                # Seçilmediyse herkesi al (Medyan hesabı için)
+                filtered_df = df_history.copy()
+                
+            filtered_df = filtered_df[filtered_df['hedef_donemi'].apply(lambda x: x.split("-")[0] in selected_years)]
 
         # --- GRAFİK FONKSİYONU ---
         def plot_forecast_vs_realized(metric_label, forecast_col, realized_col, title):
-            # 1. Tahminleri Hedef Döneme göre grupla (Medyan al)
-            forecast_agg = filtered_df.groupby("hedef_donemi")[forecast_col].median().reset_index()
-            forecast_agg.rename(columns={forecast_col: "Tahmin (Medyan)", "hedef_donemi": "Donem"}, inplace=True)
-            forecast_agg["Tip"] = "Piyasa Beklentisi"
+            fig = go.Figure()
+
+            # A) KULLANICI SEÇİLDİYSE: Her kullanıcı için ayrı çizgi
+            if selected_users:
+                # Hedef döneme göre her kullanıcının son tahminini al
+                # (Aynı hedefe birden çok kez tahmin girmiş olabilir, sonuncuyu alalım)
+                user_data = filtered_df.sort_values("tahmin_tarihi").drop_duplicates(subset=["gorunen_isim", "hedef_donemi"], keep="last")
+                
+                for user in selected_users:
+                    ud = user_data[user_data['gorunen_isim'] == user].sort_values("hedef_donemi")
+                    if not ud.empty:
+                        fig.add_trace(go.Scatter(
+                            x=ud['hedef_donemi'], y=ud[forecast_col],
+                            mode='lines+markers', name=user
+                        ))
             
-            # 2. Gerçekleşen veriyi hazırla
-            if not realized_df.empty and realized_col in realized_df.columns:
-                real_data = realized_df[['Donem', realized_col]].dropna().copy()
-                real_data.rename(columns={realized_col: "Gerçekleşen"}, inplace=True)
-                
-                # 3. İkisini Birleştir
-                merged = pd.merge(forecast_agg, real_data, on="Donem", how="outer")
-                
-                # Grafik çizimi için "Long Format"a çevir (Plotly sever)
-                # Donem | Deger | Tur
-                # 2024-01 | 3.5 | Tahmin
-                # 2024-01 | 3.8 | Gerçekleşen
-                
-                fig = go.Figure()
-                
-                # Tahmin Çizgisi
-                fig.add_trace(go.Scatter(
-                    x=merged['Donem'], y=merged['Tahmin (Medyan)'],
-                    mode='lines+markers', name='Beklenti (Medyan)',
-                    line=dict(color='blue', width=3), marker=dict(size=8)
-                ))
-                
-                # Gerçekleşen Çizgisi
-                fig.add_trace(go.Scatter(
-                    x=merged['Donem'], y=merged['Gerçekleşen'],
-                    mode='lines+markers', name='Gerçekleşen',
-                    line=dict(color='red', width=3, dash='dot'), marker=dict(symbol='x', size=10, color='red')
-                ))
-                
-                fig.update_layout(title=title, hovermode="x unified", legend=dict(orientation="h", y=1.1))
-                return fig
+            # B) KULLANICI SEÇİLMEDİYSE: Medyan Çizgisi
             else:
-                return None
+                forecast_agg = filtered_df.groupby("hedef_donemi")[forecast_col].median().reset_index()
+                fig.add_trace(go.Scatter(
+                    x=forecast_agg['hedef_donemi'], y=forecast_agg[forecast_col],
+                    mode='lines+markers', name='Piyasa Medyanı',
+                    line=dict(color='blue', width=4), marker=dict(size=8)
+                ))
+
+            # C) GERÇEKLEŞEN VERİ (Her durumda göster)
+            if not realized_df.empty and realized_col in realized_df.columns:
+                real_data = realized_df[['Donem', realized_col]].dropna().sort_values("Donem")
+                # Grafik karmaşasını önlemek için sadece seçilen yıllara ait gerçekleşmeleri gösterelim
+                real_data = real_data[real_data['Donem'].apply(lambda x: x.split("-")[0] in selected_years)]
+                
+                if not real_data.empty:
+                    fig.add_trace(go.Scatter(
+                        x=real_data['Donem'], y=real_data[realized_col],
+                        mode='lines+markers', name='Gerçekleşen',
+                        line=dict(color='red', width=3, dash='dot'), marker=dict(symbol='x', size=10, color='red')
+                    ))
+
+            fig.update_layout(title=title, hovermode="x unified", legend=dict(orientation="h", y=1.1))
+            return fig
 
         # --- GRAFİKLERİ GÖSTER (2x2 GRID) ---
         g1, g2 = st.columns(2)
-        
         with g1:
-            st.subheader("🏦 Politika Faizi (PPK)")
-            fig_ppk = plot_forecast_vs_realized("PPK", "tahmin_ppk_faiz", "PPK Faizi", "PPK Beklentisi vs Gerçekleşen")
-            if fig_ppk: st.plotly_chart(fig_ppk, use_container_width=True)
-            else: st.info("Veri yetersiz.")
-            
+            st.plotly_chart(plot_forecast_vs_realized("PPK", "tahmin_ppk_faiz", "PPK Faizi", "PPK Beklentisi vs Gerçekleşen"), use_container_width=True)
         with g2:
-            st.subheader("📆 Yıl Sonu PPK")
-            # Yıl sonu PPK için, gerçekleşen değer olarak o yılın Aralık ayındaki PPK'yı baz alıyoruz.
-            # Ancak grafikte "Hedef Dönem" bazlı gittiğimiz için, 'tahmin_yilsonu_faiz' verisi
-            # genellikle 'YYYY-12' dönemine denk gelir.
-            fig_ys_ppk = plot_forecast_vs_realized("YS PPK", "tahmin_yilsonu_faiz", "PPK Faizi", "Yıl Sonu Faiz Beklentisi vs Gerçekleşen")
-            if fig_ys_ppk: st.plotly_chart(fig_ys_ppk, use_container_width=True)
-            else: st.info("Veri yetersiz.")
+            st.plotly_chart(plot_forecast_vs_realized("YS PPK", "tahmin_yilsonu_faiz", "PPK Faizi", "Yıl Sonu Faiz Beklentisi"), use_container_width=True)
 
         g3, g4 = st.columns(2)
-        
         with g3:
-            st.subheader("📉 Aylık Enflasyon")
-            fig_ay_enf = plot_forecast_vs_realized("Aylık Enf", "tahmin_aylik_enf", "Aylık TÜFE", "Aylık TÜFE Beklentisi vs Gerçekleşen")
-            if fig_ay_enf: st.plotly_chart(fig_ay_enf, use_container_width=True)
-            else: st.info("Veri yetersiz.")
-            
+            st.plotly_chart(plot_forecast_vs_realized("Aylık Enf", "tahmin_aylik_enf", "Aylık TÜFE", "Aylık TÜFE Beklentisi"), use_container_width=True)
         with g4:
-            st.subheader("🗓️ Yıllık Enflasyon")
-            fig_yil_enf = plot_forecast_vs_realized("Yıllık Enf", "tahmin_yillik_enf", "Yıllık TÜFE", "Yıllık TÜFE Beklentisi vs Gerçekleşen")
-            if fig_yil_enf: st.plotly_chart(fig_yil_enf, use_container_width=True)
-            else: st.info("Veri yetersiz.")
+            st.plotly_chart(plot_forecast_vs_realized("Yıllık Enf", "tahmin_yillik_enf", "Yıllık TÜFE", "Yıllık TÜFE Beklentisi"), use_container_width=True)
+            
+        # --- EN İYİ TAHMİNCİLER (Performans Ligi) ---
+        st.markdown("---")
+        st.subheader("🏆 En İyi Tahminciler (Performans Ligi)")
+        
+        if realized_df.empty:
+            st.info("Performans hesabı için EVDS verisi (Gerçekleşenler) gerekiyor.")
+        else:
+            # Mantık: Tahmin edilen 'hedef_donemi' ile gerçekleşen 'Donem' eşleşiyorsa farkı (error) hesapla.
+            perf_cols = st.columns(3)
+            
+            def calculate_best(forecast_col, real_col, title, col_obj):
+                # 1. Tahmin ve Gerçekleşeni Birleştir
+                df_perf = pd.merge(df_history, realized_df[['Donem', real_col]], left_on="hedef_donemi", right_on="Donem", how="inner")
+                if df_perf.empty:
+                    col_obj.caption(f"{title}: Yeterli veri yok.")
+                    return
+
+                # 2. Farkı Hesapla (Absolute Error)
+                df_perf['error'] = (df_perf[forecast_col] - df_perf[real_col]).abs()
+                
+                # 3. Kişi bazında ortalama hata
+                leaderboard = df_perf.groupby('gorunen_isim')[['error', 'hedef_donemi']].agg({'error': 'mean', 'hedef_donemi': 'count'}).reset_index()
+                # En az 1 tahmini olanları al, hataya göre sırala (az hata iyi)
+                leaderboard = leaderboard.sort_values('error').head(5)
+                
+                col_obj.markdown(f"**{title}**")
+                for i, row in leaderboard.iterrows():
+                    col_obj.write(f"{i+1}. **{row['gorunen_isim']}** (Sapma: {row['error']:.2f})")
+
+            calculate_best("tahmin_yilsonu_enf", "Yıllık TÜFE", "🎯 En İyi Yıllık Enf. Tahmini", perf_cols[0])
+            calculate_best("tahmin_aylik_enf", "Aylık TÜFE", "🎯 En İyi Aylık Enf. Tahmini", perf_cols[1])
+            calculate_best("tahmin_ppk_faiz", "PPK Faizi", "🎯 En İyi PPK Tahmini", perf_cols[2])
+
+# ========================================================
+# SAYFA: RAPOR OLUŞTUR (YENİLENEREK GERİ GELDİ)
+# ========================================================
+elif page == "📄 Rapor Oluştur":
+    st.title("📄 Detaylı Rapor Oluştur")
+    st.info("Belirli bir hedef tarih için beklentilerin zaman içindeki değişimini (History) inceleyin.")
+    
+    res_t = supabase.table(TABLE_TAHMIN).select("*").execute()
+    df_t = pd.DataFrame(res_t.data)
+    
+    if not df_t.empty:
+        df_t = clean_and_sort_data(df_t)
+        
+        # Hedef Dönem Seçimi
+        targets = sorted(df_t['hedef_donemi'].unique())
+        selected_target = st.selectbox("Hangi Hedef Dönemi Raporlamak İstersiniz?", targets, index=len(targets)-1)
+        
+        # Filtrele
+        report_df = df_t[df_t['hedef_donemi'] == selected_target].copy()
+        
+        # Katılımcı bilgisini ekle (join)
+        res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad, anket_kaynagi").execute()
+        df_k = pd.DataFrame(res_k.data)
+        if not df_k.empty:
+            report_df = pd.merge(report_df, df_k, left_on="kullanici_adi", right_on="ad_soyad", how="left")
+            report_df['gorunen_isim'] = report_df.apply(lambda x: f"{x['kullanici_adi']} ({x['anket_kaynagi']})" if pd.notnull(x.get('anket_kaynagi')) else x['kullanici_adi'], axis=1)
+        else:
+            report_df['gorunen_isim'] = report_df['kullanici_adi']
+
+        # Grafik: Zaman içindeki değişim
+        st.subheader(f"{selected_target} Hedefi İçin Beklenti Değişimi")
+        
+        fig = px.line(report_df.sort_values("tahmin_tarihi"), 
+                      x="tahmin_tarihi", y="tahmin_yilsonu_enf", 
+                      color="gorunen_isim", markers=True,
+                      title="Enflasyon Beklentilerinin Evrimi")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.write("Veri Tablosu:")
+        st.dataframe(report_df[['tahmin_tarihi', 'gorunen_isim', 'tahmin_yilsonu_enf', 'tahmin_ppk_faiz']].sort_values("tahmin_tarihi", ascending=False), use_container_width=True)
 
 # ========================================================
 # SAYFA: GELİŞMİŞ VERİ HAVUZU (TOPLU SİLME MODU)
@@ -355,12 +413,7 @@ elif page == "Gelişmiş Veri Havuzu":
         # --- SİLME MODU AÇIKSA ---
         if silme_modu:
             st.warning("⚠️ Aşağıdaki listeden silmek istediğiniz kayıtların yanındaki kutucuğu işaretleyin ve en alttaki butona basın.")
-            
-            # Checkbox için geçici bir sütun ekleyelim
             df_t.insert(0, "Sec", False)
-            
-            # Tabloyu düzenlenebilir modda göster (Sadece 'Sec' sütunu değişebilir)
-            # Görünümün düzgün olması için ID ve Sec başa alınıyor
             column_order = ["Sec", "id", "kullanici_adi", "anket_donemi", "hedef_donemi", "tahmin_yilsonu_enf", "tahmin_ppk_faiz", "tahmin_tarihi"]
             remaining_cols = [c for c in df_t.columns if c not in column_order]
             final_cols = column_order + remaining_cols
@@ -368,48 +421,28 @@ elif page == "Gelişmiş Veri Havuzu":
             edited_df = st.data_editor(
                 df_t[final_cols],
                 column_config={
-                    "Sec": st.column_config.CheckboxColumn(
-                        "Sil?",
-                        help="Silmek için seçiniz",
-                        default=False,
-                    ),
+                    "Sec": st.column_config.CheckboxColumn("Sil?", default=False),
                     "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"),
                 },
-                disabled=[c for c in df_t.columns if c != "Sec"], # Sadece checkbox'a izin ver
-                use_container_width=True,
-                hide_index=True,
-                key="editor_silme"
+                disabled=[c for c in df_t.columns if c != "Sec"], 
+                use_container_width=True, hide_index=True, key="editor_silme"
             )
-            
-            # Seçilenleri Filtrele
             secilenler = edited_df[edited_df["Sec"] == True]
-            
             if not secilenler.empty:
                 st.markdown(f"--- \n🔴 **{len(secilenler)}** adet kayıt seçildi.")
-                
                 if st.button("🗑️ SEÇİLENLERİ KALICI OLARAK SİL", type="primary"):
                     ids_to_delete = secilenler["id"].tolist()
                     try:
-                        # Supabase'den toplu silme işlemi (.in_ komutu ile)
                         supabase.table(TABLE_TAHMIN).delete().in_("id", ids_to_delete).execute()
                         st.success(f"{len(ids_to_delete)} kayıt başarıyla silindi!")
-                        time.sleep(1.5)
-                        st.rerun() # Sayfayı yenile
-                    except Exception as e:
-                        st.error(f"Silme sırasında hata oluştu: {e}")
-            else:
-                st.info("Silmek için listeden kayıt seçiniz.")
+                        time.sleep(1.5); st.rerun()
+                    except Exception as e: st.error(f"Hata: {e}")
+            else: st.info("Silmek için listeden kayıt seçiniz.")
 
-        # --- SİLME MODU KAPALIYSA (NORMAL GÖRÜNÜM) ---
+        # --- SİLME MODU KAPALIYSA ---
         else:
             display_cols = ["id", "kullanici_adi", "anket_donemi", "hedef_donemi", "tahmin_yilsonu_enf", "tahmin_ppk_faiz", "tahmin_tarihi"]
-            st.dataframe(
-                df_t[display_cols], 
-                use_container_width=True,
-                column_config={
-                    "tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY"),
-                }
-            )
+            st.dataframe(df_t[display_cols], use_container_width=True, column_config={"tahmin_tarihi": st.column_config.DateColumn("Tarih", format="DD.MM.YYYY")})
             st.download_button("📥 Excel İndir", to_excel(df_t), "tum_veriler.xlsx", type="primary")
 
     else:
@@ -429,8 +462,6 @@ elif page == "🔥 Isı Haritası":
         df_latest = df_t.sort_values('anket_donemi').drop_duplicates(subset=['kullanici_adi', 'hedef_donemi'], keep='last')
         pivot = df_latest.pivot(index="gorunen_isim", columns="hedef_donemi", values=metric)
         pivot = pivot.reindex(columns=sorted(pivot.columns))
-        
-        # MATPLOTLIB BAĞIMLILIĞINI KALDIRDIK, STANDARD DATAFRAME VEYA PLOTLY KULLANIYORUZ
         st.dataframe(pivot.style.background_gradient(cmap="RdYlGn_r", axis=None).format("{:.2f}"), use_container_width=True, height=600)
 
 # ========================================================
@@ -438,19 +469,15 @@ elif page == "🔥 Isı Haritası":
 # ========================================================
 elif page == "📥 Toplu Veri Yükleme (Excel)":
     st.header("📥 Toplu Veri Yükleme")
-    st.info("Sistem, Excel'deki 'Tarih' sütununu kullanarak 'Anket Dönemi'ni otomatik hesaplar.")
-
+    
     def generate_excel_template():
-        cols = [
-            "Katılımcı Adı", "Hedef Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)", "Kategori", "Link", 
+        cols = ["Katılımcı Adı", "Hedef Dönem (YYYY-AA)", "Tarih (YYYY-AA-GG)", "Kategori", "Link", 
             "PPK Medyan", "PPK Min", "PPK Max", 
             "Yıl Sonu Faiz Medyan", "Yıl Sonu Faiz Min", "Yıl Sonu Faiz Max",
             "Aylık Enf Medyan", "Aylık Enf Min", "Aylık Enf Max",
             "Yıllık Enf Medyan", "Yıllık Enf Min", "Yıllık Enf Max",
             "Yıl Sonu Enf Medyan", "Yıl Sonu Enf Min", "Yıl Sonu Enf Max",
-            "N Sayısı",
-            "Gelecek Hedef Dönem", "Gelecek Tahmin (Enf)", "Gelecek Tahmin (PPK)"
-        ]
+            "N Sayısı", "Gelecek Hedef Dönem", "Gelecek Tahmin (Enf)", "Gelecek Tahmin (PPK)"]
         df_temp = pd.DataFrame(columns=cols)
         df_temp.loc[0] = ["Örnek Banka", "2025-12", "2025-01-15", "Kurumsal", "", 45.0, 42.0, 48.0, 40.0, 38.0, 42.0, 1.5, 1.2, 1.8, 30.0, 28.0, 32.0, 35.0, 33.0, 37.0, 15, "2026-12", 25.0, 35.0]
         output = io.BytesIO()
@@ -463,7 +490,6 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
     if uploaded_file:
         df_upload = pd.read_excel(uploaded_file)
         if st.button("🚀 Verileri Veritabanına İşle"):
-            # Önce mevcut kullanıcıları çekelim
             existing_users_response = supabase.table(TABLE_KATILIMCI).select("ad_soyad").execute()
             existing_users_set = {r['ad_soyad'] for r in existing_users_response.data}
             
@@ -475,12 +501,10 @@ elif page == "📥 Toplu Veri Yükleme (Excel)":
                     cat = str(row.get("Kategori", "Bireysel"))
                     link = str(row.get("Link", ""))
                     raw_date = row["Tarih (YYYY-AA-GG)"]
-                    
-                    # Kullanıcı yoksa EKLE
                     if user and (user not in existing_users_set):
                         try:
                             supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": user, "kategori": cat}).execute()
-                            existing_users_set.add(user) # Listeye ekle ki tekrar denemesin
+                            existing_users_set.add(user)
                         except: pass
                     
                     def cv(val): 
@@ -527,17 +551,31 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
         st.markdown("---")
         data = {}; kat_sayisi = 1
         
+        # --- MIN / MAX ALANLARI GERİ EKLENDİ ---
         if page == "PPK Girişi":
             c1, c2 = st.columns(2)
             v1 = c1.number_input("Medyan PPK (%)", step=0.25)
+            min1 = c1.number_input("Min PPK", step=0.25); max1 = c1.number_input("Max PPK", step=0.25)
+            
             v2 = c2.number_input("Yıl Sonu PPK (%)", step=0.25)
-            data = {"tahmin_ppk_faiz": v1, "tahmin_yilsonu_faiz": v2}
+            min2 = c2.number_input("Min YS PPK", step=0.25); max2 = c2.number_input("Max YS PPK", step=0.25)
+            
+            data = {"tahmin_ppk_faiz": v1, "min_ppk_faiz": min1, "max_ppk_faiz": max1,
+                    "tahmin_yilsonu_faiz": v2, "min_yilsonu_faiz": min2, "max_yilsonu_faiz": max2}
         else: # Enflasyon
             c1, c2, c3 = st.columns(3)
             v1 = c1.number_input("Aylık Enflasyon (%)", step=0.01, format="%.2f")
+            min1 = c1.number_input("Min Aylık", step=0.01); max1 = c1.number_input("Max Aylık", step=0.01)
+            
             v2 = c2.number_input("Yıllık Enflasyon (%)", step=0.01, format="%.2f")
+            min2 = c2.number_input("Min Yıllık", step=0.01); max2 = c2.number_input("Max Yıllık", step=0.01)
+            
             v3 = c3.number_input("Yıl Sonu Enflasyon (%)", step=0.01, format="%.2f")
-            data = {"tahmin_aylik_enf": v1, "tahmin_yillik_enf": v2, "tahmin_yilsonu_enf": v3}
+            min3 = c3.number_input("Min Yıl Sonu", step=0.01); max3 = c3.number_input("Max Yıl Sonu", step=0.01)
+            
+            data = {"tahmin_aylik_enf": v1, "min_aylik_enf": min1, "max_aylik_enf": max1,
+                    "tahmin_yillik_enf": v2, "min_yillik_enf": min2, "max_yillik_enf": max2,
+                    "tahmin_yilsonu_enf": v3, "min_yilsonu_enf": min3, "max_yilsonu_enf": max3}
             
         kat_sayisi = st.number_input("Katılımcı Sayısı (N)", value=1)
         data["katilimci_sayisi"] = kat_sayisi
@@ -565,42 +603,26 @@ elif page in ["PPK Girişi", "Enflasyon Girişi"]:
 elif page == "Katılımcı Yönetimi":
     st.header("👥 Katılımcı Yönetimi")
     
-    # --- YENİ EKLENEN BUTON: SENKRONİZASYON ---
-    st.info("💡 Eğer 'Veri Havuzu'nda görünen kişiler burada listelenmiyorsa aşağıdaki butona basınız.")
     if st.button("🔄 Veri Havuzundaki Kişileri Buraya Eşle (Sync)"):
         with st.spinner("Taranıyor..."):
-            # 1. Tahmin tablosundaki tüm benzersiz isimleri al
             res_t = supabase.table(TABLE_TAHMIN).select("kullanici_adi, kategori").execute()
             all_forecast_users = pd.DataFrame(res_t.data)
-            
             if not all_forecast_users.empty:
                 unique_forecast_users = all_forecast_users.drop_duplicates(subset=['kullanici_adi'])
-                
-                # 2. Katılımcı tablosundaki isimleri al
                 res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad").execute()
                 existing_users = set([r['ad_soyad'] for r in res_k.data])
-                
                 added_count = 0
                 for _, row in unique_forecast_users.iterrows():
-                    user = row['kullanici_adi']
-                    cat = row.get('kategori', 'Bireysel')
-                    
+                    user = row['kullanici_adi']; cat = row.get('kategori', 'Bireysel')
                     if user not in existing_users:
                         try:
                             supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": user, "kategori": cat}).execute()
                             added_count += 1
                         except: pass
-                
-                if added_count > 0:
-                    st.success(f"✅ {added_count} eksik kişi katılımcı listesine eklendi!")
-                    time.sleep(1.5); st.rerun()
-                else:
-                    st.info("✅ Liste zaten güncel. Eksik kişi bulunamadı.")
-            else:
-                st.warning("Veri havuzu boş.")
-
-    st.markdown("---")
+                if added_count > 0: st.success(f"✅ {added_count} eksik kişi eklendi!"); time.sleep(1.5); st.rerun()
+                else: st.info("✅ Liste güncel.")
     
+    st.markdown("---")
     with st.expander("➕ Manuel Yeni Kişi Ekle"):
         with st.form("new_kat"):
             ad = st.text_input("Ad / Kurum Adı")
@@ -616,6 +638,19 @@ elif page == "Katılımcı Yönetimi":
     df_kat = pd.DataFrame(res.data)
     if not df_kat.empty:
         st.dataframe(df_kat, use_container_width=True)
+        
+        # --- TEHLİKELİ BÖLGE: TAM SİLME (ŞİFRE KORUMALI) ---
         st.markdown("### 🚨 Tehlikeli Bölge")
-        if st.button("🔥 Tüm Verileri Silme Talebi"):
-            st.warning("Bu özellik 'App Password' gerektirir. (Kod içinde mevcut, entegre edilebilir)")
+        with st.expander("💣 Tüm Veritabanını Sıfırla"):
+            st.error("DİKKAT: Bu işlem 'Tahminler' ve 'Katılımcılar' tablolarındaki TÜM verileri kalıcı olarak siler.")
+            admin_pwd = st.text_input("Onay için Yönetici Şifresi", type="password")
+            if st.button("🔥 HEPSİNİ SİL"):
+                if admin_pwd == SITE_SIFRESI:
+                    try:
+                        # Supabase'de tüm satırları silmek için 'neq' (not equal) mantığı kullanılabilir
+                        supabase.table(TABLE_TAHMIN).delete().neq("id", 0).execute()
+                        supabase.table(TABLE_KATILIMCI).delete().neq("id", 0).execute()
+                        st.success("Tüm veritabanı başarıyla temizlendi."); time.sleep(2); st.rerun()
+                    except Exception as e: st.error(f"Hata: {e}")
+                else:
+                    st.error("Hatalı Şifre!")
