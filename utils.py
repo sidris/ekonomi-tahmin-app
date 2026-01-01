@@ -108,3 +108,62 @@ def check_login():
     if 'giris_yapildi' not in st.session_state:
         st.session_state['giris_yapildi'] = False
     return st.session_state['giris_yapildi']
+
+# --- utils.py dosyasının en altına ekleyin ---
+
+def sync_participants_from_forecasts():
+    """
+    Tahmin tablosunu tarar, Katılımcı tablosunda olmayan isimleri bulur
+    ve otomatik olarak Katılımcı tablosuna ekler.
+    """
+    # 1. Tüm tahminleri çek (Sadece isim ve kategori)
+    res_t = supabase.table(TABLE_TAHMIN).select("kullanici_adi, kategori").execute()
+    df_t = pd.DataFrame(res_t.data)
+    
+    if df_t.empty:
+        return 0, "Tahmin verisi yok."
+
+    # 2. Mevcut katılımcıları çek
+    res_k = supabase.table(TABLE_KATILIMCI).select("ad_soyad").execute()
+    existing_users = set([r['ad_soyad'] for r in res_k.data])
+
+    # 3. Farkları bul
+    unique_forecast_users = df_t.drop_duplicates(subset=['kullanici_adi'])
+    added_count = 0
+    
+    for _, row in unique_forecast_users.iterrows():
+        user = row['kullanici_adi']
+        # Kategori boşsa varsayılan ata
+        cat = row.get('kategori')
+        if not cat: cat = "Bireysel"
+        
+        if user not in existing_users:
+            try:
+                supabase.table(TABLE_KATILIMCI).insert({"ad_soyad": user, "kategori": cat}).execute()
+                added_count += 1
+            except:
+                pass # Hata olursa (örn: aynı anda başkası eklediyse) geç
+                
+    return added_count, f"{added_count} yeni kişi eklendi."
+
+def update_participant(old_name, new_name, new_category, row_id):
+    """
+    Katılımcı bilgilerini günceller.
+    """
+    try:
+        # Katılımcı tablosunu güncelle
+        supabase.table(TABLE_KATILIMCI).update({
+            "ad_soyad": new_name, 
+            "kategori": new_category
+        }).eq("id", row_id).execute()
+        
+        # Eğer isim değiştiyse, Tahminler tablosundaki eski isimleri de güncellememiz gerekir!
+        if old_name != new_name:
+            supabase.table(TABLE_TAHMIN).update({
+                "kullanici_adi": new_name
+            }).eq("kullanici_adi", old_name).execute()
+            
+        return True, "Güncellendi"
+    except Exception as e:
+        return False, str(e)
+
