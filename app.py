@@ -2,7 +2,17 @@ import streamlit as st
 import utils
 import time
 
-st.set_page_config(page_title="Finansal Terminal", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Finansal Terminal", page_icon="📊", layout="wide", initial_sidebar_state="collapsed")
+
+# --- CSS İLE MENÜYÜ GİZLEME HİLESİ ---
+# Eğer giriş yapılmadıysa sidebar'ı (navigasyonu) tamamen gizle
+if not st.session_state.get('giris_yapildi', False):
+    st.markdown("""
+    <style>
+        [data-testid="stSidebar"] {display: none;}
+        [data-testid="stSidebarCollapsedControl"] {display: none;}
+    </style>
+    """, unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -30,15 +40,14 @@ if not utils.check_login():
                     st.error("Hatalı Şifre!")
 else:
     st.markdown('<div class="login-container"><p class="big-font">👋 Hoşgeldiniz</p></div>', unsafe_allow_html=True)
-    st.info("✅ Oturumunuz açık. Sol taraftaki menüyü kullanarak işlemlerinizi yapabilirsiniz.")
+    st.info("✅ Oturumunuz açık. Sol taraftaki menü otomatik olarak aktifleşmiştir.")
     
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("""
         ### 🚀 Hızlı Erişim
-        * **Dashboard:** Piyasa analizlerini inceleyin.
-        * **Veri Girişi:** Tekil tahmin girin.
-        * **Excel Yükleme:** Toplu veri aktarın.
+        * **Dashboard:** Piyasa analizlerini ve Şampiyonlar Ligi'ni inceleyin.
+        * **Veri Girişi:** Tahminlerinizi girin.
         """)
     with col2:
         if st.button("🚪 Çıkış Yap", type="secondary"):
