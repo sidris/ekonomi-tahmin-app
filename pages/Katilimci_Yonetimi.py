@@ -1,123 +1,167 @@
+import time
+import pandas as pd
 import streamlit as st
 import utils
-import pandas as pd
-import time
+from theme import apply_theme, page_header
 
 st.set_page_config(page_title="Katılımcı Yönetimi", layout="wide")
-if not utils.check_login(): st.stop()
+apply_theme()
 
-st.title("👥 Katılımcı Yönetimi")
+if not utils.check_login():
+    st.warning("Lütfen giriş yapınız.")
+    st.stop()
 
-# --- 1. EŞLEME (SYNC) BÖLÜMÜ ---
-st.info("💡 **İpucu:** Excel ile yüklediğiniz kişiler listede görünmüyorsa aşağıdaki butona basarak veritabanını eşleyiniz.")
+page_header("👥 Katılımcı Yönetimi", "Kurumsal, anket ve bireysel katılımcıları düzenle")
 
-if st.button("🔄 Listeyi Veri Havuzuyla Eşle (Sync)"):
-    with st.spinner("Tahmin tablosu taranıyor ve eksik kişiler ekleniyor..."):
-        count, msg = utils.sync_participants_from_forecasts()
-        if count > 0:
-            st.success(f"İşlem Tamam! {msg}")
-            time.sleep(1)
-            st.rerun()
-        else:
-            st.success("Liste zaten güncel.")
+col1, col2 = st.columns([1, 2], gap="large")
 
-st.markdown("---")
-
-# --- 2. DÜZENLEME VE LİSTELEME BÖLÜMÜ ---
-col1, col2 = st.columns([1, 2])
-
-# SOL KOLON: Yeni Ekleme
+# ---- SOL: Yeni Ekleme ----
 with col1:
-    st.subheader("➕ Yeni Kişi Ekle")
-    with st.form("add_user_form"):
-        new_user = st.text_input("Ad Soyad / Kurum Adı")
-        cat = st.selectbox("Kategori", ["Bireysel", "Kurumsal", "Anket"])
-        submit = st.form_submit_button("Ekle")
-        
-        if submit:
-            if new_user:
-                try:
-                    utils.supabase.table(utils.TABLE_KATILIMCI).insert({"ad_soyad": new_user, "kategori": cat}).execute()
-                    st.success("Eklendi!")
-                    time.sleep(0.5)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Hata: {e}")
-            else:
-                st.warning("İsim boş olamaz.")
-
-# SAĞ KOLON: Düzenlenebilir Liste
-with col2:
-    st.subheader("✏️ Mevcut Listeyi Düzenle")
-    
-    # Veriyi veritabanından çek
-    df = utils.get_participants()
-    
-    if not df.empty:
-        # ID sütununu gizleyip, Kategori sütununu Selectbox yapalım
-        edited_df = st.data_editor(
-            df,
-            column_config={
-                "id": None, # ID'yi gizle (kullanıcı değiştirmesin)
-                "ad_soyad": "Katılımcı Adı",
-                "kategori": st.column_config.SelectboxColumn(
-                    "Kategori",
-                    help="Kategoriyi değiştirmek için seçiniz",
-                    width="medium",
-                    options=[
-                        "Bireysel",
-                        "Kurumsal",
-                        "Anket"
-                    ],
-                    required=True
-                )
-            },
-            disabled=["created_at"], # Tarih değiştirilemesin
-            hide_index=True,
-            use_container_width=True,
-            key="participant_editor"
+    st.markdown(
+        """
+        <div class="soft-card">
+          <h3>➕ Yeni Katılımcı</h3>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.form("add_user_form", clear_on_submit=True):
+        new_user = st.text_input("Ad / Kurum Adı")
+        cat = st.selectbox(
+            "Kategori",
+            utils.KATEGORILER,
+            help="Anket = min/max/N gerekir. Diğerleri tek nokta tahmin.",
         )
+        submit = st.form_submit_button("Ekle", type="primary", use_container_width=True)
 
-        st.caption("⚠️ Tablo üzerinde değişiklik yaptıktan sonra kaydetmek için aşağıdaki butona basınız.")
-        
-        if st.button("💾 Değişiklikleri Kaydet"):
-            # Değişiklikleri algıla
-            # Streamlit data_editor tüm tabloyu döndürür. Veritabanı ile karşılaştırıp farkları bulmak yerine
-            # daha güvenli bir yöntem olarak: Dataframe'deki her satırı ID'sine göre güncelleyebiliriz.
-            # Ancak performans için sadece değişenleri bulmak daha iyidir ama basitlik adına loop kuralım.
-            
-            progress = st.progress(0)
-            total = len(edited_df)
-            errors = []
-            
-            for index, row in edited_df.iterrows():
-                # Orjinal veriden farklı mı diye kontrol etmek (Pandas merge) karmaşık olabilir.
-                # Kullanıcı sayısı az olduğu için (muhtemelen <1000) her satırı upsert/update yapmak sorun olmaz.
-                
-                # Eski ismi bulmamız lazım (İsim değişikliği varsa forecast tablosunu da güncellemek için)
-                # Bu örnekte karmaşıklığı önlemek için veritabanındaki ID'ye göre işlem yapıyoruz.
-                try:
-                    # Orjinal isme ihtiyacımız var, bunun için df'den (eski veri) ID ile çekelim
-                    old_row = df[df['id'] == row['id']].iloc[0]
-                    old_name = old_row['ad_soyad']
-                    
-                    utils.update_participant(
-                        old_name=old_name, 
-                        new_name=row['ad_soyad'], 
-                        new_category=row['kategori'], 
-                        row_id=row['id']
-                    )
-                except Exception as e:
-                    errors.append(f"{row['ad_soyad']} güncellenemedi: {e}")
-                
-                progress.progress((index + 1) / total)
-            
-            if not errors:
-                st.success("✅ Tüm değişiklikler başarıyla kaydedildi!")
-                time.sleep(1)
+        if submit:
+            ok, msg = utils.add_participant(new_user, cat)
+            if ok:
+                st.success(msg)
+                time.sleep(0.5)
                 st.rerun()
             else:
-                st.error(f"Bazı hatalar oluştu: {errors}")
+                st.error(f"Hata: {msg}")
 
+    # Özet
+    df_summary = utils.get_participants()
+    if not df_summary.empty:
+        st.markdown("##### Dağılım")
+        for kat in utils.KATEGORILER:
+            n = (df_summary["kategori"] == kat).sum()
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                f"border-bottom:1px solid rgba(148,163,184,0.1);'>"
+                f"<span style='color:#94A3B8;font-size:13px;'>{kat}</span>"
+                f"<b style='font-variant-numeric:tabular-nums;'>{n}</b>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+# ---- SAĞ: Düzenleme ----
+with col2:
+    st.markdown("#### ✏️ Mevcut Liste")
+    df = utils.get_participants()
+
+    if df.empty:
+        st.info("Henüz katılımcı eklenmemiş. Soldan ekleyebilirsiniz.")
     else:
-        st.info("Henüz katılımcı eklenmemiş.")
+        # Filtreleme
+        fc1, fc2 = st.columns([2, 1])
+        search = fc1.text_input("🔍 Ara", placeholder="İsim ara...")
+        cat_filter = fc2.multiselect(
+            "Kategori",
+            utils.KATEGORILER,
+            default=utils.KATEGORILER,
+        )
+
+        df_view = df[df["kategori"].isin(cat_filter)].copy()
+        if search:
+            df_view = df_view[
+                df_view["ad_soyad"].str.contains(search, case=False, na=False)
+            ]
+
+        display_cols = [c for c in df_view.columns if c != "created_at"]
+        edited_df = st.data_editor(
+            df_view[display_cols],
+            column_config={
+                "id": None,
+                "ad_soyad": st.column_config.TextColumn("Katılımcı Adı", required=True),
+                "kategori": st.column_config.SelectboxColumn(
+                    "Kategori",
+                    width="medium",
+                    options=utils.KATEGORILER,
+                    required=True,
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="participant_editor",
+            num_rows="fixed",
+            height=min(500, 50 + 35 * len(df_view)),
+        )
+
+        sc1, sc2 = st.columns([1, 1])
+        with sc1:
+            if st.button("💾 Değişiklikleri Kaydet", type="primary", use_container_width=True):
+                progress = st.progress(0)
+                total = len(edited_df)
+                errors = []
+                df_old_indexed = df.set_index("id")
+                changed = 0
+
+                for i, (_, row) in enumerate(edited_df.iterrows()):
+                    row_id = row["id"]
+                    new_name = row["ad_soyad"]
+                    new_cat = row["kategori"]
+
+                    try:
+                        old_name = df_old_indexed.loc[row_id, "ad_soyad"]
+                        old_cat = df_old_indexed.loc[row_id, "kategori"]
+                        if old_name != new_name or old_cat != new_cat:
+                            ok, msg = utils.update_participant(
+                                row_id=row_id,
+                                new_name=new_name,
+                                new_category=new_cat,
+                                old_name=old_name,
+                            )
+                            if ok:
+                                changed += 1
+                            else:
+                                errors.append(f"{new_name}: {msg}")
+                    except KeyError:
+                        errors.append(f"{new_name}: ID bulunamadı")
+                    except Exception as e:
+                        errors.append(f"{new_name}: {e}")
+
+                    progress.progress((i + 1) / total)
+
+                if not errors:
+                    st.success(f"✅ {changed} değişiklik kaydedildi!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("Bazı hatalar oluştu:\n" + "\n".join(errors))
+
+        with sc2:
+            if st.button("🗑️ Seçili Katılımcıları Sil", use_container_width=True):
+                st.warning(
+                    "Silmek için aşağıdaki akordeonu kullanın — tek tek onay gerekir."
+                )
+
+        # Silme paneli
+        with st.expander("🗑️ Katılımcı Sil (onay gerektirir)"):
+            del_target = st.selectbox(
+                "Silinecek katılımcı",
+                df_view["ad_soyad"].tolist(),
+                key="del_select",
+            )
+            if st.button("Sil", key="del_btn", type="secondary"):
+                target_id = df_view[df_view["ad_soyad"] == del_target]["id"].iloc[0]
+                ok, msg = utils.delete_participant(target_id)
+                if ok:
+                    st.success(msg)
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error(msg)
