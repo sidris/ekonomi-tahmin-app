@@ -1,7 +1,6 @@
 import time
 import streamlit as st
 import utils
-from theme import apply_theme
 
 st.set_page_config(
     page_title="Finansal Tahmin Terminali",
@@ -9,7 +8,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-apply_theme()
+utils.apply_theme()
 
 
 def require_login():
