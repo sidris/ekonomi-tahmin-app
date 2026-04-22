@@ -4,16 +4,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import utils
-from theme import apply_theme, page_header
 
 st.set_page_config(page_title="Piyasa Verileri", layout="wide")
-apply_theme()
+utils.apply_theme()
 
-if not utils.check_login():
-    st.warning("Lütfen giriş yapınız.")
-    st.stop()
+utils.require_login_page()
 
-page_header(
+utils.page_header(
     "📊 Resmi Piyasa Verileri",
     "TCMB EVDS (TÜFE hibrit 2003/2025) + BIS (politika faizi)",
 )

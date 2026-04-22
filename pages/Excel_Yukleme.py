@@ -2,16 +2,13 @@ import io
 import pandas as pd
 import streamlit as st
 import utils
-from theme import apply_theme, page_header
 
 st.set_page_config(page_title="Excel Yükleme", layout="wide")
-apply_theme()
+utils.apply_theme()
 
-if not utils.check_login():
-    st.warning("Lütfen giriş yapınız.")
-    st.stop()
+utils.require_login_page()
 
-page_header("📥 Toplu Excel Yükleme", "Bir Excel dosyasıyla toplu tahmin ekle")
+utils.page_header("📥 Toplu Excel Yükleme", "Bir Excel dosyasıyla toplu tahmin ekle")
 
 st.markdown(
     """

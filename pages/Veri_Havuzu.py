@@ -1,15 +1,12 @@
 import streamlit as st
 import utils
-from theme import apply_theme, page_header
 
 st.set_page_config(page_title="Veri Havuzu", layout="wide")
-apply_theme()
+utils.apply_theme()
 
-if not utils.check_login():
-    st.warning("Lütfen giriş yapınız.")
-    st.stop()
+utils.require_login_page()
 
-page_header("🗃️ Veri Havuzu", "Tüm tahminleri görüntüle, filtrele ve sil")
+utils.page_header("🗃️ Veri Havuzu", "Tüm tahminleri görüntüle, filtrele ve sil")
 
 df = utils.get_all_forecasts()
 

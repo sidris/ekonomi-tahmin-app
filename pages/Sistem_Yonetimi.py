@@ -1,16 +1,13 @@
 import time
 import streamlit as st
 import utils
-from theme import apply_theme, page_header
 
 st.set_page_config(page_title="Sistem Yönetimi", layout="wide")
-apply_theme()
+utils.apply_theme()
 
-if not utils.check_login():
-    st.warning("Lütfen giriş yapınız.")
-    st.stop()
+utils.require_login_page()
 
-page_header(
+utils.page_header(
     "⚙️ Sistem Yönetimi",
     "Demo verisi üretme, veritabanı sıfırlama ve senkronizasyon",
 )

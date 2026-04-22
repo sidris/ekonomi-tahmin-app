@@ -2,16 +2,13 @@ import time
 import pandas as pd
 import streamlit as st
 import utils
-from theme import apply_theme, page_header
 
 st.set_page_config(page_title="Katılımcı Yönetimi", layout="wide")
-apply_theme()
+utils.apply_theme()
 
-if not utils.check_login():
-    st.warning("Lütfen giriş yapınız.")
-    st.stop()
+utils.require_login_page()
 
-page_header("👥 Katılımcı Yönetimi", "Kurumsal, anket ve bireysel katılımcıları düzenle")
+utils.page_header("👥 Katılımcı Yönetimi", "Kurumsal, anket ve bireysel katılımcıları düzenle")
 
 col1, col2 = st.columns([1, 2], gap="large")
 

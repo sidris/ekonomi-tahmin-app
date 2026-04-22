@@ -1,16 +1,13 @@
 import datetime
 import streamlit as st
 import utils
-from theme import apply_theme, page_header, category_badge
 
 st.set_page_config(page_title="Veri Girişi", layout="wide")
-apply_theme()
+utils.apply_theme()
 
-if not utils.check_login():
-    st.warning("Giriş yapınız.")
-    st.stop()
+utils.require_login_page()
 
-page_header("➕ Manuel Veri Girişi", "Tek bir tahmin kaydı ekle veya güncelle")
+utils.page_header("➕ Manuel Veri Girişi", "Tek bir tahmin kaydı ekle veya güncelle")
 
 df_kat = utils.get_participants()
 if df_kat.empty:
@@ -44,7 +41,7 @@ info_text = {
 st.markdown(
     f"""
     <div class="soft-card" style="padding:12px 16px;margin-top:8px;">
-      {category_badge(user_cat)}
+      {utils.category_badge(user_cat)}
       <span style="margin-left:10px;color:#94A3B8;font-size:13px;">{info_text}</span>
     </div>
     """,

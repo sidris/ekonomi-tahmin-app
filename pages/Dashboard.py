@@ -5,16 +5,13 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import utils
-from theme import apply_theme, page_header, category_badge
 
 st.set_page_config(page_title="Dashboard", layout="wide")
-apply_theme()
+utils.apply_theme()
 
-if not utils.check_login():
-    st.warning("Lütfen giriş yapınız.")
-    st.stop()
+utils.require_login_page()
 
-page_header("📈 Piyasa Analiz Dashboardu", "Tahminler, gerçekleşen veriler ve performans kıyaslamaları")
+utils.page_header("📈 Piyasa Analiz Dashboardu", "Tahminler, gerçekleşen veriler ve performans kıyaslamaları")
 
 # =============================================================
 # Veriler
@@ -135,7 +132,7 @@ else:
                         <div class="leader-card">
                           <span class="leader-rank">{medal}</span>
                           <span class="leader-name">{row['gorunen_isim']}</span>
-                          {category_badge(kat) if kat else ''}
+                          {utils.category_badge(kat) if kat else ''}
                           <div class="leader-meta">
                             Tahmin: <b>{row[forecast_col]:.2f}</b> &nbsp;•&nbsp;
                             Sapma: <b>{row['sapma']:.2f}</b>
