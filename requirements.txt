@@ -1,8 +1,10 @@
 streamlit
 supabase
 pandas
+numpy
 plotly
 requests
 xlsxwriter
 openpyxl
 matplotlib
+evds
